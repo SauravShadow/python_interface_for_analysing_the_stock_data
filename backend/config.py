@@ -11,10 +11,10 @@ class Settings(BaseSettings):
     DATABASE_URL: str = (
         "postgresql+asyncpg://postgres:postgres@localhost:5432/flattrade_dashboard"
     )
-    FLATTRADE_PROJECT_PATH: str = (
-        "/home/subaru/projects/FlatTrade_API-ReadyToUse"
-    )
+    FLATTRADE_PROJECT_PATH: str = "/app"
+    DATA_DIR: str = "./data"
     ML_MODELS_DIR: str = "./ml_models"
+    REDIS_URL: str = "redis://localhost:6379/0"
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
     SECRET_KEY: str = "change_me_in_production"
 
