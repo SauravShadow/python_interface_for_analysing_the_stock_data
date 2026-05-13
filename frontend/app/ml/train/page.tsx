@@ -60,6 +60,7 @@ export default function TrainPage() {
   const [modelId, setModelId] = useState<string | null>(null)
   const [lossHistory, setLossHistory] = useState<{ epoch: number; loss: number; val_loss?: number }[]>([])
   const logRef = useRef<HTMLDivElement>(null)
+  const pollRef = useRef<ReturnType<typeof window.setInterval> | null>(null)
 
   useEffect(() => {
     if (cachedSymbols.length) { setSymbols(cachedSymbols); setSymbol(cachedSymbols[0]) }
@@ -75,6 +76,12 @@ export default function TrainPage() {
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
   }, [logs])
+
+  useEffect(() => {
+    return () => {
+      if (pollRef.current !== null) window.clearInterval(pollRef.current)
+    }
+  }, [])
 
   const addLog = (text: string, type: LogEntry['type'] = 'info') =>
     setLogs(p => [...p, { text, type }])
@@ -114,7 +121,7 @@ export default function TrainPage() {
         const { task_id, model_id } = res.data
         addLog(`Task dispatched. Model ID: ${model_id}`, 'info')
 
-        const pollInterval = setInterval(() => {
+        const pollInterval = window.setInterval(() => {
           mlApi.getTaskStatus(task_id)
             .then(r => {
               const d = r.data
@@ -125,31 +132,32 @@ export default function TrainPage() {
                 case 'PROGRESS':
                   if (d.type === 'epoch') {
                     addLog(`Epoch ${d.epoch}/${d.total}: loss=${d.loss?.toFixed(4)}`, 'info')
-                    setLossHistory(prev => [...prev, { epoch: d.epoch, loss: d.loss }])
+                    setLossHistory(prev => [...prev, { epoch: d.epoch, loss: d.loss, ...(d.val_loss != null ? { val_loss: d.val_loss } : {}) }])
                   } else {
                     addLog(d.msg || 'Training...', 'info')
                   }
                   break
                 case 'SUCCESS':
-                  clearInterval(pollInterval)
+                  window.clearInterval(pollInterval)
                   setMetrics(d.metrics)
                   setModelId(d.model_id)
                   addLog(`Training complete! Model saved as ${d.model_id}`, 'ok')
                   setTraining(false)
                   break
                 case 'FAILURE':
-                  clearInterval(pollInterval)
+                  window.clearInterval(pollInterval)
                   addLog(`Training failed: ${d.msg}`, 'err')
                   setTraining(false)
                   break
               }
             })
             .catch(err => {
-              clearInterval(pollInterval)
+              window.clearInterval(pollInterval)
               addLog(`Poll error: ${err.message}`, 'err')
               setTraining(false)
             })
         }, 1000)
+        pollRef.current = pollInterval
       })
       .catch(err => {
         addLog(`Failed to start training: ${err.message}`, 'err')
