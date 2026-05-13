@@ -14,6 +14,7 @@ from logger import get_logger
 from services.ml_service import ml_service
 from services.data_service import data_service
 from worker import celery_app
+from tasks.ml_tasks import train_model_task
 
 log = get_logger("routers.ml")
 
@@ -33,8 +34,6 @@ async def train_model(req: TrainRequest):
     Returns task_id and model_id immediately.
     Poll GET /ml/tasks/{task_id} for progress and results.
     """
-    from tasks.ml_tasks import train_model_task
-
     model_id = str(uuid.uuid4())
     train_params = {
         "symbol": req.symbol,
@@ -47,8 +46,8 @@ async def train_model(req: TrainRequest):
         "hyperparams": req.hyperparams,
         "filters": req.filters,
         "lookback_steps": req.lookback_steps,
-        "date_from": getattr(req, "date_from", None),
-        "date_to": getattr(req, "date_to", None),
+        "date_from": req.date_from,
+        "date_to": req.date_to,
     }
     task = train_model_task.delay(
         model_id=model_id,
