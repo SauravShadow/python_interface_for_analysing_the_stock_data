@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { dataApi, mlApi } from '@/lib/api'
 import { useRouter } from 'next/navigation'
+import { useAppStore } from '@/lib/store'
 import {
   ResponsiveContainer, LineChart, Line, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, Cell,
@@ -33,12 +34,13 @@ const ALL_FEATURES = [
   { id: 'return_10',label: 'Return 10',     group: 'Returns' },
 ]
 
-const FEATURE_GROUPS = [...new Set(ALL_FEATURES.map(f => f.group))]
+const FEATURE_GROUPS = Array.from(new Set(ALL_FEATURES.map(f => f.group)))
 
 interface LogEntry { text: string; type: 'info'|'ok'|'err'|'warn' }
 
 export default function TrainPage() {
   const router = useRouter()
+  const { symbols: cachedSymbols, setSymbols: cacheSymbols } = useAppStore()
   const [symbols, setSymbols] = useState<string[]>([])
   const [symbol, setSymbol] = useState('')
   const [modelType, setModelType] = useState('random_forest')
@@ -60,11 +62,13 @@ export default function TrainPage() {
   const logRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
+    if (cachedSymbols.length) { setSymbols(cachedSymbols); setSymbol(cachedSymbols[0]) }
     dataApi.getSummary()
       .then(r => {
         const syms = r.data.filter((s: any) => !s.symbol.includes('_')).map((s: any) => s.symbol)
         setSymbols(syms)
-        if (syms.length) setSymbol(syms[0])
+        cacheSymbols(syms)
+        setSymbol(prev => (prev && syms.includes(prev)) ? prev : (syms[0] || ''))
       }).catch(() => {})
   }, [])
 
@@ -83,20 +87,19 @@ export default function TrainPage() {
     const allSelected = groupFeatures.every(f => features.includes(f))
     setFeatures(p => allSelected
       ? p.filter(f => !groupFeatures.includes(f))
-      : [...new Set([...p, ...groupFeatures])]
+      : Array.from(new Set([...p, ...groupFeatures]))
     )
   }
 
   const handleTrain = () => {
     if (!symbol || !features.length) return
     setTraining(true); setLogs([]); setMetrics(null); setModelId(null); setLossHistory([])
-    addLog(`🚀 Starting ${MODEL_TYPES.find(m => m.id === modelType)?.label} training for ${symbol}`, 'info')
-    addLog(`   Features: ${features.join(', ')}`, 'info')
-    addLog(`   Target horizon: ${targetHorizon} candles | Interval: ${interval}min`, 'info')
+    addLog(`Starting ${MODEL_TYPES.find(m => m.id === modelType)?.label} training for ${symbol}`, 'info')
+    addLog(`Features: ${features.join(', ')}`, 'info')
 
     const payload = mlApi.buildTrainPayload({
       symbol,
-      modelType: modelType,
+      modelType,
       features,
       targetHorizon,
       interval,
@@ -106,48 +109,52 @@ export default function TrainPage() {
         : { n_estimators: nEstimators, max_depth: maxDepth },
     })
 
-    const controller = new AbortController()
+    mlApi.train(payload)
+      .then(res => {
+        const { task_id, model_id } = res.data
+        addLog(`Task dispatched. Model ID: ${model_id}`, 'info')
 
-    fetch('/api/ml/train', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    }).then(async res => {
-      const reader = res.body!.getReader()
-      const decoder = new TextDecoder()
-      let buf = ''
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buf += decoder.decode(value, { stream: true })
-        const parts = buf.split('\n\n')
-        buf = parts.pop() || ''
-        for (const part of parts) {
-          if (!part.startsWith('data: ')) continue
-          try {
-            const d = JSON.parse(part.slice(6))
-            switch (d.type) {
-              case 'start':    addLog(`📊 Loading data: ${d.records} records`, 'info'); break
-              case 'features': addLog(`🔧 Computed ${d.count} feature vectors`, 'info'); break
-              case 'split':    addLog(`📂 Train: ${d.train} · Test: ${d.test}`, 'info'); break
-              case 'epoch':
-                addLog(`   Epoch ${d.epoch}/${d.total}: loss=${d.loss?.toFixed(4)} val_loss=${d.val_loss?.toFixed(4)}`, 'info')
-                setLossHistory(prev => [...prev, { epoch: d.epoch, loss: d.loss, ...(d.val_loss != null ? { val_loss: d.val_loss } : {}) }])
-                break
-              case 'done':
-                setMetrics(d.metrics); setModelId(d.model_id)
-                addLog(`✅ Training complete! Model saved as ${d.model_id}`, 'ok')
-                break
-              case 'error':    addLog(`❌ ${d.msg}`, 'err'); break
-              default: break
-            }
-          } catch {}
-        }
-      }
-    }).catch(err => {
-      if (err.name !== 'AbortError') addLog(`❌ ${err.message}`, 'err')
-    }).finally(() => setTraining(false))
+        const pollInterval = setInterval(() => {
+          mlApi.getTaskStatus(task_id)
+            .then(r => {
+              const d = r.data
+              switch (d.state) {
+                case 'PENDING':
+                  addLog('Waiting for worker...', 'info')
+                  break
+                case 'PROGRESS':
+                  if (d.type === 'epoch') {
+                    addLog(`Epoch ${d.epoch}/${d.total}: loss=${d.loss?.toFixed(4)}`, 'info')
+                    setLossHistory(prev => [...prev, { epoch: d.epoch, loss: d.loss }])
+                  } else {
+                    addLog(d.msg || 'Training...', 'info')
+                  }
+                  break
+                case 'SUCCESS':
+                  clearInterval(pollInterval)
+                  setMetrics(d.metrics)
+                  setModelId(d.model_id)
+                  addLog(`Training complete! Model saved as ${d.model_id}`, 'ok')
+                  setTraining(false)
+                  break
+                case 'FAILURE':
+                  clearInterval(pollInterval)
+                  addLog(`Training failed: ${d.msg}`, 'err')
+                  setTraining(false)
+                  break
+              }
+            })
+            .catch(err => {
+              clearInterval(pollInterval)
+              addLog(`Poll error: ${err.message}`, 'err')
+              setTraining(false)
+            })
+        }, 1000)
+      })
+      .catch(err => {
+        addLog(`Failed to start training: ${err.message}`, 'err')
+        setTraining(false)
+      })
   }
 
   return (
@@ -164,7 +171,7 @@ export default function TrainPage() {
       </div>
 
       <div className="page-body">
-        <div style={{ display: 'grid', gridTemplateColumns: '340px 1fr', gap: 24, alignItems: 'start' }}>
+        <div className="analysis-grid" style={{ display: 'grid', gridTemplateColumns: '340px 1fr', gap: 24, alignItems: 'start' }}>
 
           {/* Config panel */}
           <div style={{ position: 'sticky', top: 58, display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -348,13 +355,13 @@ export default function TrainPage() {
                 <h3 style={{ marginBottom: 16 }}>📈 Training Results</h3>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12, marginBottom: 20 }}>
                   {[
-                    ['Accuracy',  metrics.accuracy,   v => `${(v * 100).toFixed(2)}%`, 'blue'],
-                    ['Precision', metrics.precision,  v => `${(v * 100).toFixed(2)}%`, 'green'],
-                    ['Recall',    metrics.recall,     v => `${(v * 100).toFixed(2)}%`, 'purple'],
-                    ['F1 Score',  metrics.f1,         v => v.toFixed(4),              'yellow'],
-                    ['AUC-ROC',   metrics.auc_roc,    v => v?.toFixed(4) ?? 'N/A',    'blue'],
-                    ['Sharpe',    metrics.sharpe_ratio,v => v?.toFixed(3) ?? 'N/A',   'green'],
-                  ].map(([label, val, fmt, color]: any) => val != null && (
+                    { label: 'Accuracy',  val: metrics.accuracy,     fmt: (v: number) => `${(v * 100).toFixed(2)}%`, color: 'blue' },
+                    { label: 'Precision', val: metrics.precision,    fmt: (v: number) => `${(v * 100).toFixed(2)}%`, color: 'green' },
+                    { label: 'Recall',    val: metrics.recall,       fmt: (v: number) => `${(v * 100).toFixed(2)}%`, color: 'purple' },
+                    { label: 'F1 Score',  val: metrics.f1,           fmt: (v: number) => v.toFixed(4),               color: 'yellow' },
+                    { label: 'AUC-ROC',   val: metrics.auc_roc,      fmt: (v: number) => v?.toFixed(4) ?? 'N/A',     color: 'blue' },
+                    { label: 'Sharpe',    val: metrics.sharpe_ratio,  fmt: (v: number) => v?.toFixed(3) ?? 'N/A',    color: 'green' },
+                  ].map(({ label, val, fmt, color }) => val != null && (
                     <div key={label} className={`stat-card ${color}`}>
                       <div className="stat-label">{label}</div>
                       <div className="stat-value" style={{ fontSize: '1.375rem' }}>{fmt(val)}</div>

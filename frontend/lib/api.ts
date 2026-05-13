@@ -117,6 +117,12 @@ export const mlApi = {
     api.post('/ml/predict', { model_id, symbol, horizon_candles }),
   getRecentPrices: (symbol: string, interval: string = '1min', n: number = 60) =>
     api.get(`/ml/recent-prices/${symbol}`, { params: { interval, n } }),
+  backtest: (modelId: string, n: number = 200) =>
+    api.get(`/ml/backtest/${modelId}`, { params: { n } }),
+  train: (payload: object) =>
+    api.post('/ml/train', payload),
+  getTaskStatus: (taskId: string) =>
+    api.get(`/ml/tasks/${taskId}`),
   deleteModel: (id: string) =>
     api.delete(`/ml/models/${id}`),
 }
