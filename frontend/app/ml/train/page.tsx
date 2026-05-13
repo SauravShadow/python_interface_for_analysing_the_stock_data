@@ -60,7 +60,7 @@ export default function TrainPage() {
   const [modelId, setModelId] = useState<string | null>(null)
   const [lossHistory, setLossHistory] = useState<{ epoch: number; loss: number; val_loss?: number }[]>([])
   const logRef = useRef<HTMLDivElement>(null)
-  const pollRef = useRef<ReturnType<typeof window.setInterval> | null>(null)
+  const pollRef = useRef<number | null>(null)
 
   useEffect(() => {
     if (cachedSymbols.length) { setSymbols(cachedSymbols); setSymbol(cachedSymbols[0]) }
@@ -157,7 +157,7 @@ export default function TrainPage() {
               setTraining(false)
             })
         }, 1000)
-        pollRef.current = pollInterval
+        pollRef.current = pollInterval as unknown as number
       })
       .catch(err => {
         addLog(`Failed to start training: ${err.message}`, 'err')
