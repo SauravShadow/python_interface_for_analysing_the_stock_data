@@ -20,10 +20,13 @@ from typing import Optional
 from fastapi import WebSocket
 
 from config import settings
+from logger import get_logger
 from services.flattrade import flattrade_service, _ft_path
 
 if _ft_path not in sys.path:
     sys.path.insert(0, _ft_path)
+
+log = get_logger("services.live_service")
 
 
 class LiveService:
@@ -38,26 +41,32 @@ class LiveService:
         self._latest: dict[str, dict] = {}
         # asyncio event loop reference (set from main thread)
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # tick counter for periodic log summaries
+        self._tick_count = 0
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
+        log.debug("Event loop reference stored")
 
     # ── FlatTrade WS ───────────────────────────────────────────────────────────
 
     def start_websocket(self):
         """Start the FlatTrade WebSocket connection in a background thread."""
         if self._ws_started:
+            log.debug("WebSocket already started — skipping duplicate start")
             return
         self._ws_started = True
+        log.info("Starting FlatTrade WebSocket in background thread...")
         t = threading.Thread(target=self._ws_thread, daemon=True)
         t.start()
 
     def _ws_thread(self):
         """Run in background thread — connects to FlatTrade and handles ticks."""
+        log.info("[WS-thread] Connecting to FlatTrade WebSocket...")
         try:
             api = flattrade_service.api
         except RuntimeError:
-            print("[LiveService] Not logged in — WebSocket not started")
+            log.error("[WS-thread] Not logged in — WebSocket aborted")
             self._ws_started = False
             return
 
@@ -70,14 +79,18 @@ class LiveService:
                 self._handle_tick(tick_data)
 
         def on_open():
-            print("[LiveService] FlatTrade WebSocket connected")
+            subscribed = list(self._clients.keys())
+            log.info(
+                "[WS-thread] FlatTrade WebSocket connected — %d token(s) subscribed: %s",
+                len(subscribed), subscribed or "none yet",
+            )
 
         def on_disconnect():
-            print("[LiveService] FlatTrade WebSocket disconnected — reconnecting...")
+            log.warning("[WS-thread] FlatTrade WebSocket disconnected — will reconnect on next subscribe")
             self._ws_started = False
 
         def on_error(msg):
-            print(f"[LiveService] WebSocket error: {msg}")
+            log.error("[WS-thread] WebSocket error: %s", msg)
 
         try:
             api.start_websocket(
@@ -88,23 +101,26 @@ class LiveService:
                 socket_error_callback=on_error,
             )
         except Exception as e:
-            print(f"[LiveService] WebSocket start failed: {e}")
+            log.error("[WS-thread] WebSocket start failed: %s", e, exc_info=True)
             self._ws_started = False
 
     def subscribe(self, exchange: str, token: str):
         """Subscribe to a symbol on FlatTrade WS."""
         if not self._ws_started:
+            log.info("Triggering WebSocket start before subscribe (token=%s)", token)
             self.start_websocket()
         try:
             api = flattrade_service.api
-            api.subscribe(api, [{"exchange": exchange, "token": token}])
+            api.subscribe([f"{exchange}|{token}"])
+            log.info("Subscribed to %s:%s", exchange, token)
         except Exception as e:
-            print(f"[LiveService] Subscribe error: {e}")
+            log.error("Subscribe failed for %s:%s — %s", exchange, token, e)
 
     def unsubscribe(self, exchange: str, token: str):
         try:
             api = flattrade_service.api
-            api.unsubscribe(api, [{"exchange": exchange, "token": token}])
+            api.unsubscribe([f"{exchange}|{token}"])
+            log.info("Unsubscribed from %s:%s", exchange, token)
         except Exception:
             pass
 
@@ -115,20 +131,40 @@ class LiveService:
         if not token:
             return
 
+        ltp = float(tick.get("lp", 0))
+        prev_close = float(tick.get("c", 0))
+        if prev_close > 0 and ltp > 0:
+            change_pct = round((ltp - prev_close) / prev_close * 100, 2)
+        else:
+            change_pct = float(tick.get("pc", 0))
+
         formatted = {
             "type": "tick",
             "token": token,
             "symbol": tick.get("ts", ""),
-            "ltp": float(tick.get("lp", 0)),
+            "ltp": ltp,
             "open": float(tick.get("op", 0)),
             "high": float(tick.get("h", 0)),
             "low": float(tick.get("l", 0)),
-            "close": float(tick.get("c", 0)),
+            "close": prev_close,
             "volume": int(tick.get("v", 0)),
-            "change_pct": float(tick.get("pc", 0)),
+            "change_pct": change_pct,
             "timestamp": datetime.utcnow().isoformat(),
         }
         self._latest[token] = formatted
+
+        # Log every 50th tick to avoid log spam (full detail at DEBUG level always)
+        self._tick_count += 1
+        log.debug(
+            "Tick #%d  symbol=%s  ltp=%.2f  chg=%.2f%%  vol=%s",
+            self._tick_count, formatted["symbol"], ltp, change_pct, formatted["volume"],
+        )
+        if self._tick_count % 50 == 0:
+            log.info(
+                "Tick summary: %d ticks received so far. Latest: %s @ %.2f (%.2f%%)",
+                self._tick_count, formatted["symbol"], ltp, change_pct,
+            )
+
         self._check_alerts(token, formatted["ltp"])
 
         # Broadcast to frontend clients asynchronously
@@ -136,23 +172,29 @@ class LiveService:
             asyncio.run_coroutine_threadsafe(
                 self._broadcast(token, formatted), self._loop
             )
+        else:
+            log.warning("Event loop unavailable — tick for %s not broadcast", token)
 
     async def _broadcast(self, token: str, data: dict):
         clients = self._clients.get(token, [])[:]
+        if not clients:
+            return
         dead = []
         for ws in clients:
             try:
                 await ws.send_json(data)
             except Exception:
                 dead.append(ws)
-        # Clean up disconnected clients
-        for ws in dead:
-            self._disconnect_client(token, ws)
+        if dead:
+            log.debug("Removing %d dead client(s) for token %s", len(dead), token)
+            for ws in dead:
+                self._disconnect_client(token, ws)
 
     # ── Frontend WebSocket management ──────────────────────────────────────────
 
     async def connect_client(self, token: str, ws: WebSocket, exchange: str = "NSE"):
         await ws.accept()
+        log.info("Frontend client connected for token=%s exchange=%s", token, exchange)
         with self._lock:
             if token not in self._clients:
                 self._clients[token] = []
@@ -161,16 +203,17 @@ class LiveService:
 
         # Send latest known tick immediately (if available)
         if token in self._latest:
+            log.debug("Sending cached latest tick to new client: token=%s", token)
             await ws.send_json(self._latest[token])
 
         # Keep connection alive
         try:
             while True:
                 msg = await ws.receive_text()
-                # Handle ping/pong or unsubscribe
                 if msg == "ping":
                     await ws.send_text("pong")
         except Exception:
+            log.info("Frontend client disconnected for token=%s", token)
             self._disconnect_client(token, ws)
 
     def _disconnect_client(self, token: str, ws: WebSocket):
@@ -182,9 +225,11 @@ class LiveService:
                     pass
                 if not self._clients[token]:
                     del self._clients[token]
+                    log.debug("No more clients for token=%s — removed from registry", token)
 
     def register_multiplex_client(self, token: str, ws: WebSocket, exchange: str = "NSE"):
         """Register an already-accepted WebSocket as a listener for `token`."""
+        log.debug("Multiplex subscribe: token=%s exchange=%s", token, exchange)
         with self._lock:
             if token not in self._clients:
                 self._clients[token] = []
@@ -199,6 +244,7 @@ class LiveService:
 
     def unregister_multiplex_client(self, token: str, ws: WebSocket):
         """Remove a WebSocket listener for `token`."""
+        log.debug("Multiplex unsubscribe: token=%s", token)
         self._disconnect_client(token, ws)
 
     async def _send_one(self, ws: WebSocket, data: dict):
@@ -217,6 +263,10 @@ class LiveService:
             "above": above, "below": below,
             "symbol": symbol, "note": note, "triggered": False
         })
+        log.info(
+            "Alert set: %s (token=%s) above=%s below=%s note=%r",
+            symbol, token, above, below, note,
+        )
 
     def _check_alerts(self, token: str, ltp: float):
         alerts = self._alerts.get(token, [])
@@ -234,8 +284,12 @@ class LiveService:
 
             if triggered:
                 alert["triggered"] = True
-                print(f"[ALERT] {alert['symbol']} LTP={ltp} crossed {direction} threshold. {alert.get('note','')}")
-                # Broadcast alert to all clients subscribed to this token
+                log.warning(
+                    "ALERT TRIGGERED: %s LTP=%.2f crossed %s threshold (threshold=%.2f) — %s",
+                    alert["symbol"], ltp, direction,
+                    alert["above"] if direction == "above" else alert["below"],
+                    alert.get("note", ""),
+                )
                 msg = {
                     "type": "alert",
                     "token": token,

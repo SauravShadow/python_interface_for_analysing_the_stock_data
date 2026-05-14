@@ -1,6 +1,6 @@
 'use client'
 // app/stocks/page.tsx — Stock Search & Watchlist
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { stocksApi } from '@/lib/api'
 import { useAppStore } from '@/lib/store'
 import Link from 'next/link'
@@ -113,7 +113,7 @@ export default function StocksPage() {
       )}
 
       <div className="page-body">
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 380px', gap: 24, alignItems: 'start' }}>
+        <div className="stocks-grid">
 
           {/* Left — Search */}
           <div>
@@ -124,7 +124,7 @@ export default function StocksPage() {
 
             {/* Search bar */}
             <div className="card" style={{ marginBottom: 20, padding: 20 }}>
-              <div style={{ display: 'flex', gap: 12, marginBottom: 0 }}>
+              <div className="stocks-search-bar" style={{ marginBottom: 0 }}>
                 <div style={{ flex: 1, position: 'relative' }}>
                   <input
                     className="input"
@@ -147,7 +147,7 @@ export default function StocksPage() {
                   id="exchange-select"
                   value={exchange}
                   onChange={(e) => setExchange(e.target.value)}
-                  style={{ width: 100 }}
+                  style={{ width: 'auto', flexShrink: 0 }}
                 >
                   <option value="NSE">NSE</option>
                   <option value="BSE">BSE</option>
@@ -233,7 +233,7 @@ export default function StocksPage() {
           </div>
 
           {/* Right — Watchlist */}
-          <div style={{ position: 'sticky', top: 58 }}>
+          <div className="config-panel-sticky">
             <h2 style={{ marginBottom: 14, fontSize: '1.0625rem' }}>⭐ Watchlist</h2>
             <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
               {watchlistLoading && (
@@ -276,10 +276,11 @@ export default function StocksPage() {
                 </div>
               ))}
               {watchlist.length > 0 && (
-                <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)' }}>
-                  <Link href="/data" className="btn btn-primary btn-sm w-full" style={{ justifyContent: 'center' }}>
-                    💾 Download Data for These →
-                  </Link>
+                <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', fontSize: '0.775rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                  Watchlist stocks stream live prices on the{' '}
+                  <Link href="/live" style={{ color: 'var(--accent-bright)' }}>Live Quotes</Link> page.
+                  To download historical data for analysis, use{' '}
+                  <Link href="/data" style={{ color: 'var(--accent-bright)' }}>Data Manager</Link>.
                 </div>
               )}
             </div>

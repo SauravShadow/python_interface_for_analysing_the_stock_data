@@ -1,17 +1,16 @@
 'use client'
-// app/data/page.tsx — Data Manager: download, resample, delete with SSE progress
+// app/data/page.tsx — Data Manager: download and manage historical stock data
 import { useState, useEffect, useRef } from 'react'
-import { dataApi, createSSEStream } from '@/lib/api'
+import { dataApi, stocksApi } from '@/lib/api'
 import { useAppStore } from '@/lib/store'
 import Link from 'next/link'
 
 interface DataSummary {
   symbol: string
+  exchange: string
   records: number
   date_from: string | null
   date_to: string | null
-  size_kb: number
-  resampled_versions: string[]
   last_updated: string | null
 }
 
@@ -29,11 +28,18 @@ interface DownloadProgress {
 
 export default function DataPage() {
   const { auth } = useAppStore()
+
   const [summaries, setSummaries] = useState<DataSummary[]>([])
   const [loading, setLoading] = useState(true)
 
   // Download form state
-  const [stockInput, setStockInput] = useState('')
+  const [selectedSymbols, setSelectedSymbols] = useState<string[]>([])
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<any[]>([])
+  const [searching, setSearching] = useState(false)
+  const [showDropdown, setShowDropdown] = useState(false)
+  const searchRef = useRef<HTMLDivElement>(null)
+  const searchDebounce = useRef<NodeJS.Timeout | null>(null)
   const [downloadDays, setDownloadDays] = useState(365)
   const [chunkDays, setChunkDays] = useState(50)
   const [downloadExchange, setDownloadExchange] = useState('NSE')
@@ -43,12 +49,6 @@ export default function DataPage() {
   const logRef = useRef<HTMLDivElement>(null)
   const cancelRef = useRef<(() => void) | null>(null)
 
-  // Resample state
-  const [resampleSymbol, setResampleSymbol] = useState('')
-  const [resampleInterval, setResampleInterval] = useState(5)
-  const [resampleDays, setResampleDays] = useState(90)
-  const [resampling, setResampling] = useState(false)
-
   const loadSummary = async () => {
     try {
       const res = await dataApi.getSummary()
@@ -57,7 +57,39 @@ export default function DataPage() {
     setLoading(false)
   }
 
-  useEffect(() => { loadSummary() }, [])
+  useEffect(() => {
+    loadSummary()
+    // Pre-fill from ?symbols=INFY,TCS URL param (coming from Stock Search)
+    const syms = new URLSearchParams(window.location.search).get('symbols')
+    if (syms) {
+      const parsed = syms.split(',').map(s => s.trim()).filter(Boolean)
+      if (parsed.length) setSelectedSymbols(parsed)
+    }
+  }, [])
+
+  // Live search debounce
+  useEffect(() => {
+    if (searchDebounce.current) clearTimeout(searchDebounce.current)
+    if (!searchQuery.trim() || searchQuery.length < 2) { setSearchResults([]); setShowDropdown(false); return }
+    searchDebounce.current = setTimeout(async () => {
+      setSearching(true)
+      try {
+        const res = await stocksApi.search(searchQuery, downloadExchange)
+        setSearchResults(res.data.slice(0, 10))
+        setShowDropdown(true)
+      } catch { setSearchResults([]) }
+      finally { setSearching(false) }
+    }, 350)
+  }, [searchQuery, downloadExchange])
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (searchRef.current && !searchRef.current.contains(e.target as Node)) setShowDropdown(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
 
   // Auto-scroll log
   useEffect(() => {
@@ -68,8 +100,17 @@ export default function DataPage() {
     setLogs((prev) => [...prev, { text, type }])
   }
 
+  const addSymbol = (tsym: string) => {
+    const sym = tsym.trim().toUpperCase()
+    if (sym && !selectedSymbols.includes(sym)) setSelectedSymbols(prev => [...prev, sym])
+    setSearchQuery('')
+    setShowDropdown(false)
+  }
+
+  const removeSymbol = (sym: string) => setSelectedSymbols(prev => prev.filter(s => s !== sym))
+
   const handleDownload = () => {
-    const stocks = stockInput.split(/[\n,]+/).map(s => s.trim()).filter(Boolean)
+    const stocks = selectedSymbols
     if (!stocks.length) return
 
     setDownloading(true)
@@ -85,7 +126,6 @@ export default function DataPage() {
       chunk_days: chunkDays,
     }
 
-    // POST with SSE response
     const controller = new AbortController()
     cancelRef.current = () => controller.abort()
 
@@ -157,32 +197,17 @@ export default function DataPage() {
     }
   }
 
-  const handleResample = async () => {
-    if (!resampleSymbol) return
-    setResampling(true)
+  const handleDelete = async (symbol: string, exchange: string) => {
+    if (!confirm(`Delete all data for ${symbol} (${exchange})? This cannot be undone.`)) return
     try {
-      const res = await dataApi.resample(resampleSymbol, resampleInterval, resampleDays)
-      const d = res.data
-      await loadSummary()
-      alert(`✅ Resampled to ${resampleInterval}min: ${d.records} candles\n${d.date_from} → ${d.date_to}`)
-    } catch (err: any) {
-      alert(`Error: ${err.response?.data?.detail || err.message}`)
-    } finally {
-      setResampling(false)
-    }
-  }
-
-  const handleDelete = async (symbol: string) => {
-    if (!confirm(`Delete all data for ${symbol}? This cannot be undone.`)) return
-    try {
-      await dataApi.deleteSymbol(symbol)
-      setSummaries(s => s.filter(i => i.symbol !== symbol))
+      await dataApi.deleteSymbol(symbol, exchange)
+      setSummaries(s => s.filter(i => !(i.symbol === symbol && i.exchange === exchange)))
     } catch (err: any) {
       alert(`Error: ${err.response?.data?.detail || err.message}`)
     }
   }
 
-  const fmtDate = (s: string | null) => s ? s.slice(0, 10) : '—'
+  const fmtDate = (s: string | null | undefined) => s ? s.slice(0, 10) : '—'
 
   return (
     <>
@@ -195,152 +220,187 @@ export default function DataPage() {
       </div>
 
       <div className="page-body">
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, marginBottom: 24 }}>
 
-          {/* Download panel */}
-          <div className="card">
-            <div className="card-header">
-              <h2>📥 Download Data</h2>
-              {!auth.logged_in && <span className="badge badge-red">Login required</span>}
-            </div>
+        {/* Help banner */}
+        <div style={{
+          background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.2)',
+          borderRadius: 'var(--radius-md)', padding: '12px 16px', marginBottom: 20,
+          fontSize: '0.8125rem', color: 'var(--text-secondary)', lineHeight: 1.6,
+        }}>
+          <strong style={{ color: 'var(--accent-bright)' }}>ℹ How data works: </strong>
+          Download 1-minute historical candles for any stock. When you run analysis or train an ML model
+          at a different interval (e.g. 5min), the system <strong>automatically resamples and caches</strong> that
+          interval — it will appear in the table below. Deleting a stock removes its 1min data and all cached interval files.
+        </div>
 
-            <div className="form-group">
-              <label className="form-label">Stock Symbols (one per line or comma-separated)</label>
-              <textarea
-                className="input"
-                id="stocks-textarea"
-                rows={5}
-                placeholder={'INFY\nTCS\nRELIANCE\nor: INFY, TCS, RELIANCE'}
-                value={stockInput}
-                onChange={(e) => setStockInput(e.target.value)}
-                style={{ resize: 'vertical', fontFamily: 'var(--font-mono)' }}
-                disabled={downloading}
-              />
-            </div>
+        {/* Download panel — full width */}
+        <div className="card" style={{ marginBottom: 24 }}>
+          <div className="card-header">
+            <h2>📥 Download Data</h2>
+            {!auth.logged_in && <span className="badge badge-red">Login required</span>}
+          </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 16 }}>
-              <div className="form-group" style={{ marginBottom: 0 }}>
-                <label className="form-label">Exchange</label>
-                <select className="input" value={downloadExchange} onChange={e => setDownloadExchange(e.target.value)} disabled={downloading}>
-                  <option value="NSE">NSE</option>
-                  <option value="BSE">BSE</option>
-                </select>
-              </div>
-              <div className="form-group" style={{ marginBottom: 0 }}>
-                <label className="form-label">Days</label>
-                <select className="input" value={downloadDays} onChange={e => setDownloadDays(Number(e.target.value))} disabled={downloading}>
-                  {[30, 90, 180, 365, 730, 1095, 1825, 3650].map(d => (
-                    <option key={d} value={d}>{d === 3650 ? '10yr' : d === 1825 ? '5yr' : d === 1095 ? '3yr' : d === 730 ? '2yr' : d === 365 ? '1yr' : `${d}d`}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="form-group" style={{ marginBottom: 0 }}>
-                <label className="form-label">Chunk size</label>
-                <select className="input" value={chunkDays} onChange={e => setChunkDays(Number(e.target.value))} disabled={downloading}>
-                  {[30, 50, 75, 100].map(d => <option key={d} value={d}>{d}d</option>)}
-                </select>
-              </div>
-            </div>
+          <div className="form-group">
+            <label className="form-label">Stock Symbols</label>
 
-            <button
-              className="btn btn-primary w-full"
-              id="download-btn"
-              onClick={handleDownload}
-              disabled={downloading || !auth.logged_in || !stockInput.trim()}
-            >
-              {downloading ? (
-                <><div className="spinner" style={{ width: 16, height: 16 }} /> Downloading...</>
-              ) : '📥 Start Download'}
-            </button>
-
-            {/* Progress */}
-            {progress && (
-              <div style={{ marginTop: 16 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
-                  <span>{progress.done ? '✅ Complete' : `Processing: ${progress.currentSymbol}`}</span>
-                  <span>{progress.current}/{progress.total}</span>
-                </div>
-                <div className="progress-bar">
-                  <div className="progress-fill" style={{ width: `${progress.total ? (progress.current / progress.total) * 100 : 0}%` }} />
-                </div>
+            {/* Selected chips */}
+            {selectedSymbols.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                {selectedSymbols.map(sym => (
+                  <div key={sym} style={{
+                    display: 'flex', alignItems: 'center', gap: 5,
+                    background: 'var(--accent-glow)', border: '1px solid rgba(59,130,246,0.3)',
+                    borderRadius: 20, padding: '4px 10px', fontSize: '0.8125rem', fontWeight: 600, fontFamily: 'monospace'
+                  }}>
+                    {sym}
+                    {!downloading && (
+                      <button onClick={() => removeSymbol(sym)}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', lineHeight: 1, padding: '0 0 0 2px', fontSize: '0.9rem' }}>
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                ))}
+                {!downloading && (
+                  <button className="btn btn-ghost btn-sm" style={{ fontSize: '0.75rem' }}
+                    onClick={() => setSelectedSymbols([])}>
+                    Clear all
+                  </button>
+                )}
               </div>
             )}
 
-            {/* Log */}
-            {logs.length > 0 && (
-              <div className="log-box" ref={logRef} style={{ marginTop: 14 }}>
-                {logs.map((log, i) => (
-                  <div key={i} className={`log-${log.type}`}>{log.text}</div>
-                ))}
+            {/* Search to add */}
+            {!downloading && (
+              <div ref={searchRef} style={{ position: 'relative' }}>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={{ flex: 1, position: 'relative' }}>
+                    <input
+                      className="input"
+                      placeholder={auth.logged_in ? 'Search stock name or symbol to add…' : 'Type exact symbol (e.g. INFY-EQ) — login for search'}
+                      value={searchQuery}
+                      onChange={e => setSearchQuery(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' && searchQuery.trim()) {
+                          if (searchResults.length > 0) addSymbol(searchResults[0].tsym)
+                          else addSymbol(searchQuery)
+                        }
+                      }}
+                      style={{ paddingRight: searching ? 36 : 12 }}
+                    />
+                    {searching && (
+                      <div className="spinner" style={{ width: 14, height: 14, position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)' }} />
+                    )}
+                  </div>
+                  <button className="btn btn-secondary" style={{ flexShrink: 0 }}
+                    onClick={() => {
+                      if (!searchQuery.trim()) return
+                      // Use first search result if available (avoids picking wrong symbol like SBINMID150 for "SBIN")
+                      addSymbol(searchResults.length > 0 ? searchResults[0].tsym : searchQuery)
+                    }}>
+                    + Add
+                  </button>
+                </div>
+
+                {/* Dropdown results */}
+                {showDropdown && searchResults.length > 0 && (
+                  <div style={{
+                    position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 50, marginTop: 4,
+                    background: 'var(--bg-overlay)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+                    boxShadow: 'var(--shadow-md)', maxHeight: 220, overflowY: 'auto'
+                  }}>
+                    {searchResults.map(r => (
+                      <div key={r.tsym}
+                        onClick={() => addSymbol(r.tsym)}
+                        style={{
+                          padding: '9px 14px', cursor: 'pointer', display: 'flex', gap: 10, alignItems: 'center',
+                          borderBottom: '1px solid var(--border)', transition: 'background 0.1s'
+                        }}
+                        onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = 'var(--bg-hover)'}
+                        onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'transparent'}
+                      >
+                        <span style={{ fontWeight: 700, fontFamily: 'monospace', fontSize: '0.875rem', minWidth: 100 }}>{r.tsym}</span>
+                        {r.cname && <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.cname}</span>}
+                        {selectedSymbols.includes(r.tsym) && <span className="badge badge-green" style={{ marginLeft: 'auto', flexShrink: 0 }}>✓</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {selectedSymbols.length === 0 && (
+              <div style={{ fontSize: '0.775rem', color: 'var(--text-muted)', marginTop: 6 }}>
+                Search by name or symbol and click to add. Coming from Stock Search? Symbols are pre-filled above.
               </div>
             )}
           </div>
 
-          {/* Resample panel */}
-          <div className="card">
-            <div className="card-header">
-              <h2>🔄 Resample</h2>
+          <div className="data-settings-grid">
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label className="form-label">Exchange</label>
+              <select className="input" value={downloadExchange} onChange={e => setDownloadExchange(e.target.value)} disabled={downloading}>
+                <option value="NSE">NSE</option>
+                <option value="BSE">BSE</option>
+              </select>
             </div>
-            <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginBottom: 20 }}>
-              Convert 1-min data to a higher interval (5min, 15min, 1h etc.) and save as a separate file.
-            </p>
-
-            <div className="form-group">
-              <label className="form-label">Symbol (must be downloaded first)</label>
-              <select
-                className="input"
-                id="resample-symbol"
-                value={resampleSymbol}
-                onChange={e => setResampleSymbol(e.target.value)}
-              >
-                <option value="">— Select symbol —</option>
-                {summaries.filter(s => !s.symbol.includes('_')).map(s => (
-                  <option key={s.symbol} value={s.symbol}>{s.symbol}</option>
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label className="form-label">Days</label>
+              <select className="input" value={downloadDays} onChange={e => setDownloadDays(Number(e.target.value))} disabled={downloading}>
+                {[30, 90, 180, 365, 730, 1095, 1825, 3650].map(d => (
+                  <option key={d} value={d}>{d === 3650 ? '10yr' : d === 1825 ? '5yr' : d === 1095 ? '3yr' : d === 730 ? '2yr' : d === 365 ? '1yr' : `${d}d`}</option>
                 ))}
               </select>
             </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
-              <div className="form-group" style={{ marginBottom: 0 }}>
-                <label className="form-label">Interval (minutes)</label>
-                <select className="input" value={resampleInterval} onChange={e => setResampleInterval(Number(e.target.value))}>
-                  {[2, 3, 5, 10, 15, 30, 60, 120, 240].map(v => (
-                    <option key={v} value={v}>{v >= 60 ? `${v / 60}h` : `${v}min`}</option>
-                  ))}
-                </select>
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                Chunk size
+                <span title="The broker API can't return years of data in one call. Your date range is split into chunks of this many days. Smaller = more reliable. Larger = fewer API calls." style={{ cursor: 'help', color: 'var(--text-muted)', fontSize: '0.8rem' }}>ⓘ</span>
+              </label>
+              <select className="input" value={chunkDays} onChange={e => setChunkDays(Number(e.target.value))} disabled={downloading}>
+                {[30, 50, 75, 100].map(d => <option key={d} value={d}>{d}d</option>)}
+              </select>
+              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 4 }}>
+                {chunkDays === 30 && 'Conservative — use if getting timeouts'}
+                {chunkDays === 50 && 'Recommended — works with most brokers'}
+                {chunkDays === 75 && 'Faster — fewer API calls, slightly riskier'}
+                {chunkDays === 100 && 'Fastest — may hit broker rate limits'}
               </div>
-              <div className="form-group" style={{ marginBottom: 0 }}>
-                <label className="form-label">Last N days</label>
-                <select className="input" value={resampleDays} onChange={e => setResampleDays(Number(e.target.value))}>
-                  {[30, 60, 90, 180, 365].map(d => <option key={d} value={d}>{d}d</option>)}
-                </select>
-              </div>
-            </div>
-
-            <button
-              className="btn btn-secondary w-full"
-              id="resample-btn"
-              onClick={handleResample}
-              disabled={resampling || !resampleSymbol}
-            >
-              {resampling ? <><div className="spinner" style={{ width: 16, height: 16 }} /> Resampling...</> : '🔄 Resample'}
-            </button>
-
-            <div className="divider" />
-
-            <h3 style={{ marginBottom: 12, fontSize: '0.9375rem' }}>Common intervals</h3>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-              {[[2,'2min'],[3,'3min'],[5,'5min'],[10,'10min'],[15,'15min'],[30,'30min'],[60,'1hr'],[120,'2hr']].map(([val, label]) => (
-                <button
-                  key={val}
-                  className={`checkbox-chip ${resampleInterval === val ? 'active' : ''}`}
-                  onClick={() => setResampleInterval(Number(val))}
-                >
-                  {label}
-                </button>
-              ))}
             </div>
           </div>
+
+          <button
+            className="btn btn-primary w-full"
+            id="download-btn"
+            onClick={handleDownload}
+            disabled={downloading || !auth.logged_in || selectedSymbols.length === 0}
+          >
+            {downloading ? (
+              <><div className="spinner" style={{ width: 16, height: 16 }} /> Downloading...</>
+            ) : '📥 Start Download'}
+          </button>
+
+          {/* Progress */}
+          {progress && (
+            <div style={{ marginTop: 16 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
+                <span>{progress.done ? '✅ Complete' : `Processing: ${progress.currentSymbol}`}</span>
+                <span>{progress.current}/{progress.total}</span>
+              </div>
+              <div className="progress-bar">
+                <div className="progress-fill" style={{ width: `${progress.total ? (progress.current / progress.total) * 100 : 0}%` }} />
+              </div>
+            </div>
+          )}
+
+          {/* Log */}
+          {logs.length > 0 && (
+            <div className="log-box" ref={logRef} style={{ marginTop: 14 }}>
+              {logs.map((log, i) => (
+                <div key={i} className={`log-${log.type}`}>{log.text}</div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Saved data table */}
@@ -363,49 +423,41 @@ export default function DataPage() {
                 <thead>
                   <tr>
                     <th>Symbol</th>
+                    <th>Exchange</th>
                     <th>Records</th>
                     <th>From</th>
                     <th>To</th>
-                    <th>Size</th>
-                    <th>Resampled</th>
                     <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {summaries.filter(s => !s.symbol.includes('_')).map(item => (
-                    <tr key={item.symbol}>
+                  {summaries.map(item => (
+                    <tr key={`${item.symbol}-${item.exchange}`}>
                       <td>
                         <span style={{ fontWeight: 600, fontFamily: 'monospace' }}>{item.symbol}</span>
                       </td>
                       <td>
+                        <span className="badge badge-blue">{item.exchange}</span>
+                      </td>
+                      <td>
                         <span style={{ color: 'var(--accent-bright)' }}>{item.records.toLocaleString()}</span>
+                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>1min candles</div>
                       </td>
                       <td style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>{fmtDate(item.date_from)}</td>
                       <td style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>{fmtDate(item.date_to)}</td>
-                      <td style={{ color: 'var(--text-muted)', fontSize: '0.8125rem' }}>{item.size_kb.toFixed(0)} KB</td>
-                      <td>
-                        {item.resampled_versions.length > 0 ? (
-                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                            {item.resampled_versions.map(v => (
-                              <span key={v} className="badge badge-blue" style={{ fontSize: '0.7rem' }}>{v}</span>
-                            ))}
-                          </div>
-                        ) : (
-                          <span style={{ color: 'var(--text-muted)', fontSize: '0.8125rem' }}>—</span>
-                        )}
-                      </td>
                       <td>
                         <div style={{ display: 'flex', gap: 6 }}>
                           <Link
                             href={`/analysis?symbol=${item.symbol}`}
                             className="btn btn-secondary btn-sm"
+                            title="Analyse"
                           >
                             📊
                           </Link>
                           <button
                             className="btn btn-danger btn-sm"
-                            onClick={() => handleDelete(item.symbol)}
-                            title="Delete data"
+                            onClick={() => handleDelete(item.symbol, item.exchange)}
+                            title="Delete all data"
                           >
                             🗑
                           </button>

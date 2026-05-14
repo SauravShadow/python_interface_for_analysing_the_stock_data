@@ -35,10 +35,10 @@ export const stocksApi = {
 export const dataApi = {
   getSummary: () =>
     api.get('/data/summary'),
-  resample: (symbol: string, interval_minutes: number, days: number) =>
-    api.post('/data/resample', { symbol, interval_minutes, days }),
-  deleteSymbol: (symbol: string) =>
-    api.delete(`/data/${symbol}`),
+  resample: (symbol: string, exchange: string, interval_minutes: number) =>
+    api.post('/data/resample', { symbol, exchange, interval_minutes }),
+  deleteSymbol: (symbol: string, exchange: string) =>
+    api.delete(`/data/${symbol}`, { params: { exchange } }),
 }
 
 // ── Analysis ──────────────────────────────────────────────────────────────────

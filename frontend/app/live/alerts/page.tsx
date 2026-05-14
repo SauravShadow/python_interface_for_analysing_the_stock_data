@@ -43,7 +43,7 @@ export default function AlertsPage() {
         exchange: item.exchange,
         token: item.token,
         tsym: item.tsym,
-        condition: form.condition,
+        condition: form.condition as 'above' | 'below',
         price: parseFloat(form.price),
       })
       const res = await liveApi.listAlerts()
@@ -72,10 +72,10 @@ export default function AlertsPage() {
       </div>
 
       <div className="page-body">
-        <div style={{ display: 'grid', gridTemplateColumns: '340px 1fr', gap: 24, alignItems: 'start' }}>
+        <div className="analysis-grid" style={{ display: 'grid', gridTemplateColumns: '340px 1fr', gap: 24, alignItems: 'start' }}>
 
           {/* Add alert form */}
-          <div className="card" style={{ position: 'sticky', top: 58 }}>
+          <div className="card config-panel-sticky">
             <h3 style={{ marginBottom: 16 }}>➕ New Alert</h3>
             <form onSubmit={handleAdd}>
               <div className="form-group">

@@ -1,11 +1,12 @@
 'use client'
 import { useState, useEffect, useRef } from 'react'
-import { useSearchParams } from 'next/navigation'
+import { PanelLeftClose, PanelLeftOpen, ChevronDown } from 'lucide-react'
 import { dataApi, analysisApi } from '@/lib/api'
+import { useAppStore } from '@/lib/store'
 import {
   ResponsiveContainer, LineChart, Line, BarChart, Bar,
   ComposedChart, AreaChart, Area, XAxis, YAxis, CartesianGrid,
-  Tooltip, Legend, ReferenceLine, Cell,
+  Tooltip, Legend, ReferenceLine, Cell, Brush,
 } from 'recharts'
 import html2canvas from 'html2canvas'
 
@@ -17,6 +18,9 @@ const ANALYSIS_TYPES = [
   { id: 'volume',      label: 'Volume',      icon: '📦', desc: 'Volume profile & OBV' },
   { id: 'patterns',    label: 'Patterns',    icon: '🕯️', desc: 'Candlestick pattern detection' },
   { id: 'drawdown',    label: 'Drawdown',    icon: '📉', desc: 'Max drawdown & recovery' },
+  { id: 'seasonality', label: 'Seasonality', icon: '📅', desc: 'Best months & weekdays to trade' },
+  { id: 'momentum',    label: 'Momentum',    icon: '🚀', desc: 'Rate of change & momentum score' },
+  { id: 'riskreturn',  label: 'Risk/Return', icon: '⚖️',  desc: 'Sharpe, Sortino, VaR, win rate' },
 ]
 
 const DATE_PRESETS = [
@@ -32,9 +36,12 @@ const DATE_PRESETS = [
 const WEEKDAYS = ['Monday','Tuesday','Wednesday','Thursday','Friday']
 
 export default function AnalysisPage() {
-  const params = useSearchParams()
+
+  const { symbols: cachedSymbols, setSymbols: cacheSymbols } = useAppStore()
   const [symbols, setSymbols] = useState<string[]>([])
-  const [symbol, setSymbol] = useState(params.get('symbol') || '')
+  const [summaries, setSummaries] = useState<any[]>([])   // full summary for interval cache detection
+  const [loadingSymbols, setLoadingSymbols] = useState(true)
+  const [symbol, setSymbol] = useState('')
   const [selectedTypes, setSelectedTypes] = useState(['technicals'])
   const [excludeDays, setExcludeDays] = useState<string[]>([])
   const [excludeMonthStart, setExcludeMonthStart] = useState(false)
@@ -49,13 +56,36 @@ export default function AnalysisPage() {
   const [saving, setSaving] = useState(false)
   const [savedList, setSavedList] = useState<any[]>([])
   const [activeTab, setActiveTab] = useState(0)
+  const [panelHidden, setPanelHidden] = useState(false)
+  const [configOpen, setConfigOpen] = useState(true)
+  const [typesOpen, setTypesOpen] = useState(true)
 
   useEffect(() => {
+    if (localStorage.getItem('analysis-panel-hidden') === 'true') setPanelHidden(true)
+    if (localStorage.getItem('analysis-config-open') === 'false') setConfigOpen(false)
+    if (localStorage.getItem('analysis-types-open') === 'false') setTypesOpen(false)
+  }, [])
+
+  useEffect(() => {
+    const paramSymbol = new URLSearchParams(window.location.search).get('symbol')
+    // Pre-fill from cache immediately so the UI isn't blank while loading
+    if (cachedSymbols.length) {
+      setSymbols(cachedSymbols)
+      if (paramSymbol && cachedSymbols.includes(paramSymbol)) setSymbol(paramSymbol)
+      else setSymbol(cachedSymbols[0])
+    }
+    // Always fetch fresh — cache can be stale if data was deleted
     dataApi.getSummary().then(r => {
+      setSummaries(r.data)
       const syms = r.data.filter((s: any) => !s.symbol.includes('_')).map((s: any) => s.symbol)
       setSymbols(syms)
-      if (!symbol && syms.length) setSymbol(syms[0])
-    }).catch(() => {})
+      cacheSymbols(syms)
+      setSymbol(prev => {
+        if (prev && syms.includes(prev)) return prev
+        if (paramSymbol && syms.includes(paramSymbol)) return paramSymbol
+        return syms[0] || ''
+      })
+    }).catch(() => {}).finally(() => setLoadingSymbols(false))
     analysisApi.listSaved().then(r => setSavedList(r.data)).catch(() => {})
   }, [])
 
@@ -90,12 +120,24 @@ export default function AnalysisPage() {
       })
       setResult(res.data)
       setActiveTab(0)
+      // If we auto-resampled, refresh summaries so the banner clears
+      if (interval > 1) {
+        dataApi.getSummary().then(r => setSummaries(r.data)).catch(() => {})
+      }
     } catch (e: any) {
       setError(e.response?.data?.detail || e.message)
     } finally {
       setRunning(false)
     }
   }
+
+  // Check if the selected interval is already cached for the selected symbol
+  const intervalLabel = `${interval}min`
+  const symbolSummary = summaries.find(s => s.symbol === symbol)
+  const hasCachedInterval = interval === 1 || (
+    symbolSummary?.resampled_versions?.some((v: any) => v.interval === intervalLabel)
+  )
+  const willResample = interval > 1 && !hasCachedInterval
 
   const handleSave = async () => {
     if (!result) return
@@ -114,6 +156,14 @@ export default function AnalysisPage() {
   return (
     <>
       <div className="topbar">
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={() => { const next = !panelHidden; setPanelHidden(next); localStorage.setItem('analysis-panel-hidden', String(next)) }}
+          title={panelHidden ? 'Show configuration panel' : 'Hide configuration panel'}
+          style={{ padding: '6px 8px', flexShrink: 0 }}
+        >
+          {panelHidden ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+        </button>
         <span className="topbar-title">📊 Single Stock Analysis</span>
         <div className="topbar-actions">
           {result && <button className="btn btn-secondary btn-sm" onClick={handleSave} disabled={saving}>💾 Save</button>}
@@ -121,95 +171,141 @@ export default function AnalysisPage() {
       </div>
 
       <div className="page-body">
-        <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: 24, alignItems: 'start' }}>
+        <div className="analysis-grid" style={{ display: 'grid', gridTemplateColumns: panelHidden ? '1fr' : '320px 1fr', gap: 24, alignItems: 'start' }}>
 
           {/* Filter panel */}
-          <div style={{ position: 'sticky', top: 58 }}>
+          {!panelHidden && <div className="config-panel-sticky">
             <div className="card" style={{ marginBottom: 16 }}>
-              <h3 style={{ marginBottom: 14 }}>⚙️ Configuration</h3>
-
-              <div className="form-group">
-                <label className="form-label">Symbol</label>
-                <select className="input" value={symbol} onChange={e => setSymbol(e.target.value)}>
-                  {symbols.length === 0 && <option value="">No data downloaded yet</option>}
-                  {symbols.map(s => <option key={s} value={s}>{s}</option>)}
-                </select>
+              <div
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', marginBottom: configOpen ? 14 : 0, userSelect: 'none' }}
+                onClick={() => { const next = !configOpen; setConfigOpen(next); localStorage.setItem('analysis-config-open', String(next)) }}
+              >
+                <h3>⚙️ Configuration</h3>
+                <ChevronDown size={16} style={{ color: 'var(--text-muted)', transition: 'transform 0.2s ease', transform: configOpen ? 'rotate(0deg)' : 'rotate(-90deg)', flexShrink: 0 }} />
               </div>
 
-              <div className="form-group">
-                <label className="form-label">Interval</label>
-                <select className="input" value={interval} onChange={e => setInterval(Number(e.target.value))}>
-                  {[[1,'1min'],[2,'2min'],[3,'3min'],[5,'5min'],[10,'10min'],[15,'15min'],[30,'30min'],[60,'1hr']].map(([v,l]) =>
-                    <option key={v} value={v}>{l}</option>
-                  )}
-                </select>
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">Date range</label>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 8 }}>
-                  {DATE_PRESETS.map(p => (
-                    <button
-                      key={p.days}
-                      className={`btn btn-sm ${activePreset === p.days ? 'btn-primary' : 'btn-secondary'}`}
-                      style={{ padding: '3px 10px', fontSize: '0.775rem' }}
-                      onClick={() => applyPreset(p.days)}
-                    >
-                      {p.label}
-                    </button>
-                  ))}
-                  <button
-                    className={`btn btn-sm ${!activePreset && (dateFrom || dateTo) ? 'btn-secondary' : 'btn-ghost'}`}
-                    style={{ padding: '3px 10px', fontSize: '0.775rem' }}
-                    onClick={() => { setDateFrom(''); setDateTo(''); setActivePreset(null) }}
-                  >
-                    All
-                  </button>
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-                  <input
-                    className="input" type="date" value={dateFrom}
-                    onChange={e => { setDateFrom(e.target.value); setActivePreset(null) }}
-                    style={{ fontSize: '0.8rem' }}
-                  />
-                  <input
-                    className="input" type="date" value={dateTo}
-                    onChange={e => { setDateTo(e.target.value); setActivePreset(null) }}
-                    style={{ fontSize: '0.8rem' }}
-                  />
-                </div>
-                {(dateFrom || dateTo) && (
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 4 }}>
-                    {dateFrom || '…'} → {dateTo || '…'}
-                  </div>
-                )}
-              </div>
-
-              <label className="form-label">Exclude weekdays</label>
-              <div className="checkbox-group" style={{ marginBottom: 14 }}>
-                {WEEKDAYS.map(d => (
-                  <div key={d} className={`checkbox-chip ${excludeDays.includes(d) ? 'active' : ''}`} onClick={() => toggleDay(d)}>
-                    {d.slice(0,3)}
-                  </div>
-                ))}
-              </div>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 14 }}>
-                {[['excludeMonthStart','Exclude 1st of month'],['excludeMonthEnd','Exclude last of month']].map(([key, label]) => (
-                  <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
-                    <input type="checkbox"
-                      checked={key === 'excludeMonthStart' ? excludeMonthStart : excludeMonthEnd}
-                      onChange={e => key === 'excludeMonthStart' ? setExcludeMonthStart(e.target.checked) : setExcludeMonthEnd(e.target.checked)}
-                    />
-                    {label}
+              {configOpen && <>
+                <div className="form-group">
+                  <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    Symbol
+                    {loadingSymbols && <div className="spinner" style={{ width: 12, height: 12 }} />}
                   </label>
-                ))}
-              </div>
+                  {loadingSymbols ? (
+                    <div className="input" style={{ color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 8, pointerEvents: 'none' }}>
+                      <div className="spinner" style={{ width: 13, height: 13, flexShrink: 0 }} />
+                      Checking available data…
+                    </div>
+                  ) : symbols.length === 0 ? (
+                    <div className="input" style={{ color: 'var(--yellow)', display: 'flex', alignItems: 'center', gap: 8, pointerEvents: 'none' }}>
+                      ⚠ No data downloaded yet
+                    </div>
+                  ) : (
+                    <select className="input" value={symbol} onChange={e => setSymbol(e.target.value)}>
+                      {symbols.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                  )}
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Interval</label>
+                  <select className="input" value={interval} onChange={e => setInterval(Number(e.target.value))}>
+                    {[[1,'1min'],[2,'2min'],[3,'3min'],[5,'5min'],[10,'10min'],[15,'15min'],[30,'30min'],[60,'1hr']].map(([v,l]) =>
+                      <option key={v} value={v}>{l}</option>
+                    )}
+                  </select>
+                  {interval > 1 && (
+                    <div style={{
+                      marginTop: 7, padding: '7px 10px', borderRadius: 'var(--radius-sm)', fontSize: '0.775rem', lineHeight: 1.5,
+                      background: willResample ? 'rgba(234,179,8,0.08)' : 'rgba(34,197,94,0.08)',
+                      border: `1px solid ${willResample ? 'rgba(234,179,8,0.25)' : 'rgba(34,197,94,0.25)'}`,
+                      color: willResample ? 'var(--yellow)' : 'var(--green)',
+                    }}>
+                      {willResample
+                        ? `⏳ No cached ${intervalLabel} data — will auto-resample from 1min on first run (a few seconds, then cached).`
+                        : `✓ Cached ${intervalLabel} data available — will run instantly.`}
+                    </div>
+                  )}
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Date range</label>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 8 }}>
+                    {DATE_PRESETS.map(p => (
+                      <button
+                        key={p.days}
+                        className={`btn btn-sm ${activePreset === p.days ? 'btn-primary' : 'btn-secondary'}`}
+                        style={{ padding: '3px 10px', fontSize: '0.775rem' }}
+                        onClick={() => applyPreset(p.days)}
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                    <button
+                      className={`btn btn-sm ${!activePreset && (dateFrom || dateTo) ? 'btn-secondary' : 'btn-ghost'}`}
+                      style={{ padding: '3px 10px', fontSize: '0.775rem' }}
+                      onClick={() => { setDateFrom(''); setDateTo(''); setActivePreset(null) }}
+                    >
+                      All
+                    </button>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, overflow: 'hidden' }}>
+                    <input
+                      className="input" type="date" value={dateFrom}
+                      onChange={e => { setDateFrom(e.target.value); setActivePreset(null) }}
+                      style={{ fontSize: '0.8rem', minWidth: 0 }}
+                    />
+                    <input
+                      className="input" type="date" value={dateTo}
+                      onChange={e => { setDateTo(e.target.value); setActivePreset(null) }}
+                      style={{ fontSize: '0.8rem', minWidth: 0 }}
+                    />
+                  </div>
+                  {(dateFrom || dateTo) && (
+                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 4 }}>
+                      {dateFrom || '…'} → {dateTo || '…'}
+                    </div>
+                  )}
+                </div>
+
+                <label className="form-label">Exclude weekdays</label>
+                <div className="checkbox-group" style={{ marginBottom: 14 }}>
+                  {WEEKDAYS.map(d => (
+                    <div key={d} className={`checkbox-chip ${excludeDays.includes(d) ? 'active' : ''}`} onClick={() => toggleDay(d)}>
+                      {d.slice(0,3)}
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 14 }}>
+                  {[['excludeMonthStart','Exclude 1st of month'],['excludeMonthEnd','Exclude last of month']].map(([key, label]) => (
+                    <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
+                      <input type="checkbox"
+                        checked={key === 'excludeMonthStart' ? excludeMonthStart : excludeMonthEnd}
+                        onChange={e => key === 'excludeMonthStart' ? setExcludeMonthStart(e.target.checked) : setExcludeMonthEnd(e.target.checked)}
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+              </>}
             </div>
 
             <div className="card" style={{ marginBottom: 16 }}>
-              <h3 style={{ marginBottom: 12 }}>🔬 Analysis Types</h3>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: typesOpen ? 12 : 0, cursor: 'pointer', userSelect: 'none' }}
+                onClick={() => { const next = !typesOpen; setTypesOpen(next); localStorage.setItem('analysis-types-open', String(next)) }}
+              >
+                <h3>🔬 Analysis Types</h3>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  {typesOpen && <>
+                    <button className="btn btn-ghost btn-sm" style={{ padding: '2px 8px', fontSize: '0.7rem' }}
+                      onClick={e => { e.stopPropagation(); setSelectedTypes(ANALYSIS_TYPES.map(t => t.id)) }}>All</button>
+                    <button className="btn btn-ghost btn-sm" style={{ padding: '2px 8px', fontSize: '0.7rem' }}
+                      onClick={e => { e.stopPropagation(); setSelectedTypes([]) }}>Clear</button>
+                  </>}
+                  <ChevronDown size={16} style={{ color: 'var(--text-muted)', transition: 'transform 0.2s ease', transform: typesOpen ? 'rotate(0deg)' : 'rotate(-90deg)', flexShrink: 0 }} />
+                </div>
+              </div>
+              {typesOpen && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {ANALYSIS_TYPES.map(t => (
                   <div key={t.id}
                     className={`checkbox-chip ${selectedTypes.includes(t.id) ? 'active' : ''}`}
@@ -226,14 +322,18 @@ export default function AnalysisPage() {
                     </span>
                   </div>
                 ))}
-              </div>
+              </div>}
             </div>
 
             <button className="btn btn-primary w-full btn-lg" onClick={handleRun}
-              disabled={running || !symbol || !selectedTypes.length}>
-              {running ? <><div className="spinner" style={{ width: 18, height: 18 }} /> Running...</> : '▶ Run Analysis'}
+              disabled={running || loadingSymbols || !symbol || !selectedTypes.length || symbols.length === 0}>
+              {running
+                ? <><div className="spinner" style={{ width: 18, height: 18 }} /> {willResample ? 'Resampling & Analyzing...' : 'Running...'}</>
+                : loadingSymbols
+                  ? <><div className="spinner" style={{ width: 18, height: 18 }} /> Checking data…</>
+                  : '▶ Run Analysis'}
             </button>
-          </div>
+          </div>}
 
           {/* Results panel */}
           <div>
@@ -245,13 +345,25 @@ export default function AnalysisPage() {
 
             {!result && !running && (
               <div className="card" style={{ textAlign: 'center', padding: '60px 32px', color: 'var(--text-secondary)' }}>
-                <div style={{ fontSize: '3rem', marginBottom: 16 }}>📊</div>
-                <h2 style={{ marginBottom: 8, color: 'var(--text-primary)' }}>Configure & Run</h2>
-                <p>Select a symbol and analysis types, then click Run Analysis.</p>
-                {symbols.length === 0 && (
-                  <p style={{ marginTop: 12, color: 'var(--yellow)' }}>
-                    ⚠ No data yet — <a href="/data" style={{ color: 'var(--accent-bright)' }}>download some stocks first</a>
-                  </p>
+                {loadingSymbols ? (
+                  <>
+                    <div className="spinner" style={{ width: 36, height: 36, margin: '0 auto 16px', borderWidth: 3 }} />
+                    <h2 style={{ marginBottom: 8, color: 'var(--text-primary)' }}>Checking available data…</h2>
+                    <p>Loading your downloaded stocks.</p>
+                  </>
+                ) : symbols.length === 0 ? (
+                  <>
+                    <div style={{ fontSize: '3rem', marginBottom: 16 }}>📭</div>
+                    <h2 style={{ marginBottom: 8, color: 'var(--text-primary)' }}>No data available</h2>
+                    <p>You haven&apos;t downloaded any stock data yet.</p>
+                    <a href="/data" className="btn btn-primary" style={{ marginTop: 16, display: 'inline-flex' }}>📥 Download Data</a>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ fontSize: '3rem', marginBottom: 16 }}>📊</div>
+                    <h2 style={{ marginBottom: 8, color: 'var(--text-primary)' }}>Configure & Run</h2>
+                    <p>Select a symbol and analysis types, then click Run Analysis.</p>
+                  </>
                 )}
               </div>
             )}
@@ -259,7 +371,16 @@ export default function AnalysisPage() {
             {running && (
               <div className="card" style={{ textAlign: 'center', padding: '60px 32px' }}>
                 <div className="spinner" style={{ width: 40, height: 40, margin: '0 auto 16px', borderWidth: 3 }} />
-                <p style={{ color: 'var(--text-secondary)' }}>Running analysis for {symbol}...</p>
+                <p style={{ color: 'var(--text-secondary)', marginBottom: 6 }}>
+                  {willResample
+                    ? `Resampling ${symbol} to ${intervalLabel}...`
+                    : `Running analysis for ${symbol}...`}
+                </p>
+                {willResample && (
+                  <p style={{ fontSize: '0.8125rem', color: 'var(--text-muted)' }}>
+                    Building {intervalLabel} candles from 1min data. This only happens once — result will be cached.
+                  </p>
+                )}
               </div>
             )}
 
@@ -386,6 +507,24 @@ const CHART_INFO: Record<string, { what: string; positive: string; negative: str
     negative: 'Deep drawdowns that take months to recover = high-risk stock. The max drawdown % tells you the worst-case loss a holder experienced.',
     tip: 'Max drawdown is the key risk metric. A stock with -50% max drawdown needed a +100% gain just to break even. Use this for position sizing.',
   },
+  seasonality: {
+    what: 'Shows which calendar months and weekdays have historically produced the best average returns and win rates. Based on all available data.',
+    positive: 'Months with positive avg_return AND win_rate > 55% are historically strong entry periods. Higher candle count = more reliable signal.',
+    negative: 'Red bars (negative avg_return) and low win rates flag historically weak periods — timing entries here carries extra risk.',
+    tip: 'Use seasonality as a timing confirmation alongside price and momentum signals. A stock entering its historically best month with strong momentum is a high-conviction setup.',
+  },
+  momentum: {
+    what: 'Rate of Change (ROC) measures how much price has moved over 1, 5, and 20 periods. The composite score weights all three into a BUY/SELL/NEUTRAL signal.',
+    positive: 'All three ROC lines above zero = broad-based upward momentum. BUY signal = price consistently trending up across multiple timeframes.',
+    negative: 'ROC lines below zero = price losing ground. Divergence (fast ROC down but slow ROC up) = short-term pullback in an uptrend.',
+    tip: 'The 20-period ROC reflects the broader trend. Fast ROC (1-period) spikes are noise; use them with slow ROC context. A BUY signal while price is above 20-period high is the strongest setup.',
+  },
+  riskreturn: {
+    what: 'Quantifies the quality of returns — not just how much, but how consistently. Sharpe > 1 is good, > 2 is excellent. Win rate > 50% means more profitable days than not.',
+    positive: 'High Sharpe + high Sortino = strong risk-adjusted returns. Profit factor > 1.5 = gains more than offset losses. Rolling Sharpe above 1 = reliable performance.',
+    negative: 'Sharpe < 0 = losing risk-adjusted money. VaR 95% shows the worst expected single-period loss 5% of the time — large values signal significant downside risk.',
+    tip: 'Compare Sortino to Sharpe: if Sortino >> Sharpe, volatility is mostly upside (good). If similar, volatility is symmetric. Profit factor < 1 = losses outweigh gains overall.',
+  },
 }
 
 function ChartInfo({ type }: { type: string }) {
@@ -394,7 +533,7 @@ function ChartInfo({ type }: { type: string }) {
   return (
     <div style={{ background: 'var(--bg-input)', borderRadius: 8, padding: '12px 16px', marginBottom: 16, fontSize: '0.8125rem', lineHeight: 1.6 }}>
       <div style={{ color: 'var(--text-secondary)', marginBottom: 8 }}>{info.what}</div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
+      <div className="chart-info-grid">
         <div style={{ background: 'rgba(34,197,94,0.07)', border: '1px solid rgba(34,197,94,0.15)', borderRadius: 6, padding: '7px 10px' }}>
           <span style={{ color: 'var(--green)', fontWeight: 600, marginRight: 6 }}>↑ Positive</span>
           <span style={{ color: 'var(--text-muted)' }}>{info.positive}</span>
@@ -428,10 +567,61 @@ const axisStyle = { fill: 'var(--text-muted)', fontSize: 11 }
 const sampleRows = (rows: any[], max = 500) =>
   rows.length > max ? rows.filter((_: any, i: number) => i % Math.ceil(rows.length / max) === 0) : rows
 
+// ── Fullscreen modal ──────────────────────────────────────────────────────────
+function FullscreenModal({ label, data, onClose }: { label: string; data: any; onClose: () => void }) {
+  const info = ANALYSIS_TYPES.find(a => a.id === label)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const renderChart = (fs: boolean) => {
+    switch (data.type) {
+      case 'price':      return <PriceChart data={data} fullscreen={fs} />
+      case 'returns':    return <ReturnsChart data={data} fullscreen={fs} />
+      case 'volatility': return <VolatilityChart data={data} fullscreen={fs} />
+      case 'technicals': return <TechnicalsChart data={data} fullscreen={fs} />
+      case 'volume':     return <VolumeChart data={data} fullscreen={fs} />
+      case 'drawdown':    return <DrawdownChart data={data} fullscreen={fs} />
+      case 'patterns':    return <PatternsChart data={data} fullscreen={fs} />
+      case 'seasonality': return <SeasonalityChart data={data} fullscreen={fs} />
+      case 'momentum':    return <MomentumChart data={data} fullscreen={fs} />
+      case 'riskreturn':  return <RiskReturnChart data={data} fullscreen={fs} />
+      default:            return <StatsTable data={data} />
+    }
+  }
+
+  return (
+    <div
+      style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.85)', display: 'flex', flexDirection: 'column' }}
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 24px', background: 'var(--bg-surface)', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+        <h2 style={{ margin: 0 }}>{info?.icon} {info?.label || label}</h2>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Drag the brush below charts to zoom · Esc to close</span>
+          <button className="btn btn-secondary btn-sm" onClick={onClose} style={{ fontSize: '1.1rem', lineHeight: 1, padding: '4px 10px' }}>✕</button>
+        </div>
+      </div>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px', background: 'var(--bg-base)' }}>
+        {renderChart(true)}
+      </div>
+    </div>
+  )
+}
+
 // ── Result renderer ────────────────────────────────────────────────────────────
 function ResultSection({ label, data }: { label: string; data: any }) {
   const chartRef = useRef<HTMLDivElement>(null)
+  const [fullscreen, setFullscreen] = useState(false)
   if (!data) return null
+  if (data.error) return (
+    <div style={{ background: 'var(--red-dim)', border: '1px solid rgba(239,68,68,0.2)',
+      borderRadius: 'var(--radius-md)', padding: '14px 18px', color: 'var(--red)', marginBottom: 16 }}>
+      ❌ {label}: {data.error}
+    </div>
+  )
   const info = ANALYSIS_TYPES.find(a => a.id === label)
 
   const handleDownload = async () => {
@@ -443,37 +633,47 @@ function ResultSection({ label, data }: { label: string; data: any }) {
     link.click()
   }
 
-  const renderChart = () => {
+  const renderChart = (fs = false) => {
     switch (data.type) {
-      case 'price':      return <PriceChart data={data} />
-      case 'returns':    return <ReturnsChart data={data} />
-      case 'volatility': return <VolatilityChart data={data} />
-      case 'technicals': return <TechnicalsChart data={data} />
-      case 'volume':     return <VolumeChart data={data} />
-      case 'drawdown':   return <DrawdownChart data={data} />
-      case 'patterns':   return <PatternsChart data={data} />
-      default:           return <StatsTable data={data} />
+      case 'price':      return <PriceChart data={data} fullscreen={fs} />
+      case 'returns':    return <ReturnsChart data={data} fullscreen={fs} />
+      case 'volatility': return <VolatilityChart data={data} fullscreen={fs} />
+      case 'technicals': return <TechnicalsChart data={data} fullscreen={fs} />
+      case 'volume':     return <VolumeChart data={data} fullscreen={fs} />
+      case 'drawdown':    return <DrawdownChart data={data} fullscreen={fs} />
+      case 'patterns':    return <PatternsChart data={data} fullscreen={fs} />
+      case 'seasonality': return <SeasonalityChart data={data} fullscreen={fs} />
+      case 'momentum':    return <MomentumChart data={data} fullscreen={fs} />
+      case 'riskreturn':  return <RiskReturnChart data={data} fullscreen={fs} />
+      default:            return <StatsTable data={data} />
     }
   }
 
   return (
-    <div ref={chartRef} className="card fade-in" style={{ marginBottom: 16 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <h3>{info?.icon} {info?.label || label}</h3>
-        <button className="btn btn-secondary btn-sm" onClick={handleDownload}>↓ PNG</button>
+    <>
+      {fullscreen && <FullscreenModal label={label} data={data} onClose={() => setFullscreen(false)} />}
+      <div ref={chartRef} className="card fade-in" style={{ marginBottom: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <h3>{info?.icon} {info?.label || label}</h3>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn btn-secondary btn-sm" onClick={() => setFullscreen(true)} title="Expand to fullscreen">⛶ Expand</button>
+            <button className="btn btn-secondary btn-sm" onClick={handleDownload}>↓ PNG</button>
+          </div>
+        </div>
+        {renderChart()}
       </div>
-      {renderChart()}
-    </div>
+    </>
   )
 }
 
 // ── Per-type chart components ─────────────────────────────────────────────────
 
-function PriceChart({ data }: { data: any }) {
+const brushStyle = { stroke: 'var(--accent)', fill: 'var(--bg-overlay)', fillOpacity: 0.8 }
+
+function PriceChart({ data, fullscreen }: { data: any; fullscreen?: boolean }) {
   const rows = data.data || []
   if (!rows.length) return <p style={{ color: 'var(--text-muted)' }}>No price data available.</p>
 
-  // Compute open price for % change display
   const firstClose = rows[0]?.close ?? 0
   const lastClose  = rows[rows.length - 1]?.close ?? 0
   const totalChange = firstClose ? ((lastClose - firstClose) / firstClose) * 100 : 0
@@ -504,7 +704,7 @@ function PriceChart({ data }: { data: any }) {
 
       {/* Close price area chart */}
       <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 6 }}>Close Price</div>
-      <ResponsiveContainer width="100%" height={260}>
+      <ResponsiveContainer width="100%" height={fullscreen ? 480 : 260}>
         <ComposedChart data={rows} margin={{ top: 4, right: 16, bottom: 4, left: 8 }}>
           <defs>
             <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
@@ -544,12 +744,13 @@ function PriceChart({ data }: { data: any }) {
             fill="url(#priceGrad)"
             dot={false} name="Close" isAnimationActive={false}
           />
+          <Brush dataKey="datetime" height={22} tickFormatter={fmtDate} {...brushStyle} />
         </ComposedChart>
       </ResponsiveContainer>
 
       {/* Volume sub-chart */}
       <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '14px 0 6px' }}>Volume</div>
-      <ResponsiveContainer width="100%" height={90}>
+      <ResponsiveContainer width="100%" height={fullscreen ? 130 : 90}>
         <BarChart data={rows} margin={{ top: 0, right: 16, bottom: 0, left: 8 }}>
           <XAxis dataKey="datetime" tick={false} axisLine={false} />
           <YAxis tick={axisStyle} width={65} tickFormatter={(v: number) => v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(0)}K` : String(v)} />
@@ -561,14 +762,14 @@ function PriceChart({ data }: { data: any }) {
   )
 }
 
-function ReturnsChart({ data }: { data: any }) {
+function ReturnsChart({ data, fullscreen }: { data: any; fullscreen?: boolean }) {
   const series = data.series || []
   const histogram = data.histogram || []
   const stats = data.stats || {}
   return (
     <>
       <ChartInfo type="returns" />
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 8, marginBottom: 16 }}>
+      <div className="returns-stats-grid">
         {(['mean', 'std', 'skew', 'kurt', 'min', 'max'] as const).map(k => (
           <div key={k} style={{ background: 'var(--bg-input)', borderRadius: 6, padding: '8px 10px', textAlign: 'center' }}>
             <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: 2, textTransform: 'capitalize' }}>{k}</div>
@@ -582,7 +783,7 @@ function ReturnsChart({ data }: { data: any }) {
       {series.length > 0 && (
         <>
           <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 6 }}>Daily Returns</div>
-          <ResponsiveContainer width="100%" height={180}>
+          <ResponsiveContainer width="100%" height={fullscreen ? 400 : 180}>
             <LineChart data={sampleRows(series)} margin={{ top: 4, right: 16, bottom: 4, left: 8 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
               <XAxis dataKey="datetime" tickFormatter={fmtDate} tick={axisStyle} interval="preserveStartEnd" />
@@ -590,6 +791,7 @@ function ReturnsChart({ data }: { data: any }) {
               <Tooltip {...tooltipStyle} formatter={(v: number) => [`${v.toFixed(4)}%`, 'Return']} labelFormatter={fmtDate} />
               <ReferenceLine y={0} stroke="var(--border-light)" strokeDasharray="4 2" />
               <Line type="monotone" dataKey="daily_return" stroke="var(--accent)" dot={false} strokeWidth={1.5} name="Return" isAnimationActive={false} />
+              <Brush dataKey="datetime" height={22} tickFormatter={fmtDate} {...brushStyle} />
             </LineChart>
           </ResponsiveContainer>
         </>
@@ -617,7 +819,7 @@ function ReturnsChart({ data }: { data: any }) {
   )
 }
 
-function VolatilityChart({ data }: { data: any }) {
+function VolatilityChart({ data, fullscreen }: { data: any; fullscreen?: boolean }) {
   const series = data.rolling_vol || []
   return (
     <>
@@ -630,13 +832,14 @@ function VolatilityChart({ data }: { data: any }) {
         </div>
       )}
       {series.length > 0 && (
-        <ResponsiveContainer width="100%" height={220}>
+        <ResponsiveContainer width="100%" height={fullscreen ? 480 : 220}>
           <LineChart data={sampleRows(series)} margin={{ top: 4, right: 16, bottom: 4, left: 8 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
             <XAxis dataKey="datetime" tickFormatter={fmtDate} tick={axisStyle} interval="preserveStartEnd" />
             <YAxis tick={axisStyle} width={52} />
             <Tooltip {...tooltipStyle} formatter={(v: number) => [v.toFixed(4), 'Volatility']} labelFormatter={fmtDate} />
             <Line type="monotone" dataKey="value" stroke="var(--yellow)" dot={false} strokeWidth={2} name="Rolling Vol" isAnimationActive={false} />
+            <Brush dataKey="datetime" height={22} tickFormatter={fmtDate} {...brushStyle} />
           </LineChart>
         </ResponsiveContainer>
       )}
@@ -644,30 +847,32 @@ function VolatilityChart({ data }: { data: any }) {
   )
 }
 
-function TechnicalsChart({ data }: { data: any }) {
+function TechnicalsChart({ data, fullscreen }: { data: any; fullscreen?: boolean }) {
   const sample = sampleRows(data.data || [])
   return (
     <>
       <ChartInfo type="technicals" />
       <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 6 }}>Price & Moving Averages</div>
-      <ResponsiveContainer width="100%" height={240}>
+      <ResponsiveContainer width="100%" height={fullscreen ? 420 : 240}>
         <ComposedChart data={sample} margin={{ top: 4, right: 16, bottom: 4, left: 8 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
           <XAxis dataKey="datetime" tickFormatter={fmtDate} tick={axisStyle} interval="preserveStartEnd" />
           <YAxis tick={axisStyle} width={60} domain={['auto', 'auto']} />
           <Tooltip {...tooltipStyle} formatter={(v: number) => v.toFixed(2)} labelFormatter={fmtDate} />
           <Legend wrapperStyle={{ fontSize: '0.75rem' }} />
-          <Area type="monotone" dataKey="bb_upper" stroke="transparent" fill="var(--accent)" fillOpacity={0.06} name="BB Upper" dot={false} isAnimationActive={false} legendType="none" />
-          <Area type="monotone" dataKey="bb_lower" stroke="transparent" fill="var(--bg-surface)" fillOpacity={1} name="BB Lower" dot={false} isAnimationActive={false} legendType="none" />
+          <Area type="monotone" dataKey="bb_upper" stroke="#06b6d4" strokeWidth={1} strokeDasharray="5 3" fill="#06b6d4" fillOpacity={0.08} name="BB Upper" dot={false} isAnimationActive={false} legendType="none" />
+          <Area type="monotone" dataKey="bb_lower" stroke="#06b6d4" strokeWidth={1} strokeDasharray="5 3" fill="var(--bg-surface)" fillOpacity={1} name="BB Lower" dot={false} isAnimationActive={false} legendType="none" />
+          <Line type="monotone" dataKey="bb_middle" stroke="#06b6d4" strokeWidth={1} strokeDasharray="2 3" dot={false} name="BB Mid" isAnimationActive={false} legendType="none" />
           <Line type="monotone" dataKey="close" stroke="var(--text-secondary)" dot={false} strokeWidth={1.5} name="Close" isAnimationActive={false} />
           <Line type="monotone" dataKey="sma_20" stroke="var(--accent)" dot={false} strokeWidth={1.5} name="SMA 20" isAnimationActive={false} />
           <Line type="monotone" dataKey="ema_9" stroke="var(--green)" dot={false} strokeWidth={1.5} name="EMA 9" isAnimationActive={false} />
           <Line type="monotone" dataKey="ema_21" stroke="var(--yellow)" dot={false} strokeWidth={1.5} name="EMA 21" isAnimationActive={false} />
+          <Brush dataKey="datetime" height={22} tickFormatter={fmtDate} {...brushStyle} />
         </ComposedChart>
       </ResponsiveContainer>
 
       <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '14px 0 6px' }}>RSI (14)</div>
-      <ResponsiveContainer width="100%" height={130}>
+      <ResponsiveContainer width="100%" height={fullscreen ? 220 : 130}>
         <LineChart data={sample} margin={{ top: 4, right: 16, bottom: 4, left: 8 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
           <XAxis dataKey="datetime" tickFormatter={fmtDate} tick={axisStyle} interval="preserveStartEnd" />
@@ -680,7 +885,7 @@ function TechnicalsChart({ data }: { data: any }) {
       </ResponsiveContainer>
 
       <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '14px 0 6px' }}>MACD</div>
-      <ResponsiveContainer width="100%" height={130}>
+      <ResponsiveContainer width="100%" height={fullscreen ? 220 : 130}>
         <ComposedChart data={sample} margin={{ top: 4, right: 16, bottom: 4, left: 8 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
           <XAxis dataKey="datetime" tickFormatter={fmtDate} tick={axisStyle} interval="preserveStartEnd" />
@@ -700,12 +905,12 @@ function TechnicalsChart({ data }: { data: any }) {
   )
 }
 
-function VolumeChart({ data }: { data: any }) {
+function VolumeChart({ data, fullscreen }: { data: any; fullscreen?: boolean }) {
   const sample = sampleRows(data.data || [])
   return (
     <>
       <ChartInfo type="volume" />
-      <ResponsiveContainer width="100%" height={240}>
+      <ResponsiveContainer width="100%" height={fullscreen ? 500 : 240}>
         <ComposedChart data={sample} margin={{ top: 4, right: 16, bottom: 4, left: 8 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
           <XAxis dataKey="datetime" tickFormatter={fmtDate} tick={axisStyle} interval="preserveStartEnd" />
@@ -720,13 +925,14 @@ function VolumeChart({ data }: { data: any }) {
           <Bar yAxisId="vol" dataKey="volume" name="Volume" fill="var(--accent)" fillOpacity={0.4} isAnimationActive={false} />
           <Line yAxisId="vol" type="monotone" dataKey="vol_ma20" stroke="var(--yellow)" dot={false} strokeWidth={1.5} name="Vol MA20" isAnimationActive={false} />
           <Line yAxisId="price" type="monotone" dataKey="close" stroke="var(--green)" dot={false} strokeWidth={1.5} name="Close" isAnimationActive={false} />
+          <Brush dataKey="datetime" height={22} tickFormatter={fmtDate} {...brushStyle} />
         </ComposedChart>
       </ResponsiveContainer>
     </>
   )
 }
 
-function DrawdownChart({ data }: { data: any }) {
+function DrawdownChart({ data, fullscreen }: { data: any; fullscreen?: boolean }) {
   const sample = sampleRows(data.data || [])
   return (
     <>
@@ -738,7 +944,7 @@ function DrawdownChart({ data }: { data: any }) {
           </span>
         </div>
       )}
-      <ResponsiveContainer width="100%" height={200}>
+      <ResponsiveContainer width="100%" height={fullscreen ? 480 : 200}>
         <AreaChart data={sample} margin={{ top: 4, right: 16, bottom: 4, left: 8 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
           <XAxis dataKey="datetime" tickFormatter={fmtDate} tick={axisStyle} interval="preserveStartEnd" />
@@ -750,22 +956,23 @@ function DrawdownChart({ data }: { data: any }) {
           )}
           <ReferenceLine y={0} stroke="var(--border-light)" />
           <Area type="monotone" dataKey="drawdown" stroke="var(--red)" fill="var(--red)" fillOpacity={0.15} dot={false} name="Drawdown" isAnimationActive={false} />
+          <Brush dataKey="datetime" height={22} tickFormatter={fmtDate} {...brushStyle} />
         </AreaChart>
       </ResponsiveContainer>
     </>
   )
 }
 
-function PatternsChart({ data }: { data: any }) {
+function PatternsChart({ data, fullscreen }: { data: any; fullscreen?: boolean }) {
   const hourly = data.hourly || []
   const dow = data.day_of_week || []
   return (
     <>
       <ChartInfo type="patterns" />
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 20 }}>
       <div>
         <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 6 }}>Avg Return by Hour</div>
-        <ResponsiveContainer width="100%" height={200}>
+        <ResponsiveContainer width="100%" height={fullscreen ? 400 : 200}>
           <BarChart data={hourly} margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
             <XAxis dataKey="hour" tick={axisStyle} />
@@ -781,7 +988,7 @@ function PatternsChart({ data }: { data: any }) {
       </div>
       <div>
         <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 6 }}>Avg Return by Day</div>
-        <ResponsiveContainer width="100%" height={200}>
+        <ResponsiveContainer width="100%" height={fullscreen ? 400 : 200}>
           <BarChart data={dow} margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
             <XAxis dataKey="day" tick={axisStyle} />
@@ -832,5 +1039,229 @@ function StatsTable({ data }: { data: any }) {
         </tbody>
       </table>
     </div>
+  )
+}
+
+// ── Seasonality Chart ─────────────────────────────────────────────────────────
+function SeasonalityChart({ data, fullscreen }: { data: any; fullscreen?: boolean }) {
+  const monthly = data.monthly || []
+  const weekday = data.weekday || []
+  if (!monthly.length && !weekday.length) return <p style={{ color: 'var(--text-muted)' }}>No seasonality data available.</p>
+
+  const bestMonth = [...monthly].sort((a: any, b: any) => b.avg_return - a.avg_return)[0]
+  const bestDay   = [...weekday].sort((a: any, b: any) => b.avg_return - a.avg_return)[0]
+
+  const h = fullscreen ? 280 : 200
+
+  return (
+    <>
+      <ChartInfo type="seasonality" />
+
+      {/* Summary chips */}
+      <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
+        {bestMonth && (
+          <div style={{ background: 'var(--bg-input)', borderRadius: 6, padding: '7px 14px' }}>
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: 2 }}>Best Month</div>
+            <div style={{ fontWeight: 700, color: bestMonth.avg_return >= 0 ? 'var(--green)' : 'var(--red)', fontFamily: 'monospace' }}>
+              {bestMonth.month} ({bestMonth.avg_return >= 0 ? '+' : ''}{bestMonth.avg_return.toFixed(3)}%)
+            </div>
+          </div>
+        )}
+        {bestDay && (
+          <div style={{ background: 'var(--bg-input)', borderRadius: 6, padding: '7px 14px' }}>
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: 2 }}>Best Day</div>
+            <div style={{ fontWeight: 700, color: bestDay.avg_return >= 0 ? 'var(--green)' : 'var(--red)', fontFamily: 'monospace' }}>
+              {bestDay.day} ({bestDay.avg_return >= 0 ? '+' : ''}{bestDay.avg_return.toFixed(3)}%)
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 24 }}>
+        {monthly.length > 0 && (
+          <div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 6 }}>Monthly Average Return</div>
+            <ResponsiveContainer width="100%" height={h}>
+              <BarChart data={monthly} margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                <XAxis dataKey="month" tick={axisStyle} />
+                <YAxis tick={axisStyle} tickFormatter={(v: number) => `${v.toFixed(2)}%`} width={55} />
+                <Tooltip
+                  {...tooltipStyle}
+                  content={({ active, payload }) => {
+                    if (!active || !payload?.[0]) return null
+                    const d = payload[0].payload
+                    return (
+                      <div style={{ ...tooltipStyle.contentStyle }}>
+                        <div style={{ ...tooltipStyle.labelStyle, fontWeight: 600 }}>{d.month}</div>
+                        <div>Avg Return: {d.avg_return >= 0 ? '+' : ''}{d.avg_return?.toFixed(4)}%</div>
+                        <div style={{ color: 'var(--text-muted)' }}>Win Rate: {d.win_rate?.toFixed(1)}% · n={d.count}</div>
+                      </div>
+                    )
+                  }}
+                />
+                <Bar dataKey="avg_return" name="Avg Return" radius={[3, 3, 0, 0]} isAnimationActive={false}>
+                  {monthly.map((entry: any, i: number) => (
+                    <Cell key={i} fill={entry.avg_return >= 0 ? 'var(--green)' : 'var(--red)'} fillOpacity={0.75} />
+                  ))}
+                </Bar>
+                <ReferenceLine y={0} stroke="var(--border)" strokeWidth={2} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+        {weekday.length > 0 && (
+          <div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 6 }}>Day-of-Week Average Return</div>
+            <ResponsiveContainer width="100%" height={h}>
+              <BarChart data={weekday} margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                <XAxis dataKey="day" tick={axisStyle} />
+                <YAxis tick={axisStyle} tickFormatter={(v: number) => `${v.toFixed(2)}%`} width={55} />
+                <Tooltip
+                  {...tooltipStyle}
+                  content={({ active, payload }) => {
+                    if (!active || !payload?.[0]) return null
+                    const d = payload[0].payload
+                    return (
+                      <div style={{ ...tooltipStyle.contentStyle }}>
+                        <div style={{ ...tooltipStyle.labelStyle, fontWeight: 600 }}>{d.day}</div>
+                        <div>Avg Return: {d.avg_return >= 0 ? '+' : ''}{d.avg_return?.toFixed(4)}%</div>
+                        <div style={{ color: 'var(--text-muted)' }}>Win Rate: {d.win_rate?.toFixed(1)}% · n={d.count}</div>
+                      </div>
+                    )
+                  }}
+                />
+                <Bar dataKey="avg_return" name="Avg Return" radius={[3, 3, 0, 0]} isAnimationActive={false}>
+                  {weekday.map((entry: any, i: number) => (
+                    <Cell key={i} fill={entry.avg_return >= 0 ? 'var(--green)' : 'var(--red)'} fillOpacity={0.75} />
+                  ))}
+                </Bar>
+                <ReferenceLine y={0} stroke="var(--border)" strokeWidth={2} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+    </>
+  )
+}
+
+// ── Momentum Chart ────────────────────────────────────────────────────────────
+function MomentumChart({ data, fullscreen }: { data: any; fullscreen?: boolean }) {
+  const series  = data.series  || []
+  const current = data.current || {}
+  if (!series.length) return <p style={{ color: 'var(--text-muted)' }}>No momentum data available.</p>
+
+  const signal = current.signal || 'NEUTRAL'
+  const signalColor = signal === 'BUY' ? 'var(--green)' : signal === 'SELL' ? 'var(--red)' : 'var(--text-muted)'
+
+  return (
+    <>
+      <ChartInfo type="momentum" />
+
+      {/* Signal + current ROC chips */}
+      <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div style={{ background: 'var(--bg-input)', borderRadius: 6, padding: '7px 16px', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Signal</div>
+          <div style={{ fontWeight: 800, fontSize: '1rem', color: signalColor }}>{signal}</div>
+        </div>
+        {[['ROC 1-period', current.roc_1], ['ROC 5-period', current.roc_5], ['ROC 20-period', current.roc_20]].map(([label, val]) => (
+          val != null && (
+            <div key={String(label)} style={{ background: 'var(--bg-input)', borderRadius: 6, padding: '7px 14px' }}>
+              <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: 2 }}>{label}</div>
+              <div style={{ fontWeight: 700, fontFamily: 'monospace', color: (val as number) >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                {(val as number) >= 0 ? '+' : ''}{(val as number).toFixed(3)}%
+              </div>
+            </div>
+          )
+        ))}
+      </div>
+
+      <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 6 }}>Rate of Change (ROC)</div>
+      <ResponsiveContainer width="100%" height={fullscreen ? 480 : 240}>
+        <LineChart data={series} margin={{ top: 4, right: 16, bottom: 4, left: 8 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+          <XAxis dataKey="datetime" tickFormatter={fmtDate} tick={axisStyle} interval="preserveStartEnd" />
+          <YAxis tick={axisStyle} width={60} tickFormatter={(v: number) => `${v.toFixed(1)}%`} />
+          <Tooltip
+            {...tooltipStyle}
+            labelFormatter={fmtDate}
+            formatter={(v: number, name: string) => [`${v >= 0 ? '+' : ''}${v.toFixed(4)}%`, name]}
+          />
+          <ReferenceLine y={0} stroke="var(--border)" strokeWidth={2} strokeDasharray="4 4" />
+          <Line dataKey="roc_1"  stroke="var(--accent-bright)" strokeWidth={1.5} dot={false} name="ROC 1" isAnimationActive={false} />
+          <Line dataKey="roc_5"  stroke="var(--yellow)"        strokeWidth={1.5} dot={false} name="ROC 5" isAnimationActive={false} />
+          <Line dataKey="roc_20" stroke="#a855f7"              strokeWidth={2}   dot={false} name="ROC 20" isAnimationActive={false} />
+          <Legend />
+          <Brush dataKey="datetime" height={22} tickFormatter={fmtDate} {...brushStyle} />
+        </LineChart>
+      </ResponsiveContainer>
+    </>
+  )
+}
+
+// ── Risk/Return Chart ─────────────────────────────────────────────────────────
+function RiskReturnChart({ data, fullscreen }: { data: any; fullscreen?: boolean }) {
+  const sharpe  = data.rolling_sharpe || []
+  const metrics = data.metrics || {}
+  if (!sharpe.length && !Object.keys(metrics).length) return <p style={{ color: 'var(--text-muted)' }}>No risk/return data available.</p>
+
+  const endSharpe = sharpe.length ? sharpe[sharpe.length - 1].sharpe : null
+
+  const metricChips: { label: string; val: number | null; fmt: (v: number) => string; good: (v: number) => boolean }[] = [
+    { label: 'Sharpe',        val: metrics.sharpe,        fmt: (v: number) => v.toFixed(3), good: (v: number) => v > 1 },
+    { label: 'Sortino',       val: metrics.sortino,       fmt: (v: number) => v.toFixed(3), good: (v: number) => v > 1 },
+    { label: 'Win Rate',      val: metrics.win_rate_pct,  fmt: (v: number) => `${v.toFixed(1)}%`, good: (v: number) => v > 50 },
+    { label: 'Profit Factor', val: metrics.profit_factor, fmt: (v: number) => v.toFixed(3), good: (v: number) => v > 1 },
+    { label: 'VaR 95%',       val: metrics.var_95_pct,    fmt: (v: number) => `${v.toFixed(3)}%`, good: (v: number) => v > -2 },
+    { label: 'CVaR 95%',      val: metrics.cvar_95_pct,   fmt: (v: number) => `${v.toFixed(3)}%`, good: (v: number) => v > -3 },
+  ]
+
+  return (
+    <>
+      <ChartInfo type="riskreturn" />
+
+      {/* Metrics grid */}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 20 }}>
+        {metricChips.map(({ label, val, fmt, good }) => val != null && (
+          <div key={label} style={{ background: 'var(--bg-input)', borderRadius: 6, padding: '8px 14px', minWidth: 110 }}>
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: 3 }}>{label}</div>
+            <div style={{ fontWeight: 700, fontFamily: 'monospace', fontSize: '0.9rem', color: good(val) ? 'var(--green)' : 'var(--red)' }}>
+              {fmt(val)}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {sharpe.length > 0 && (
+        <>
+          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 6 }}>
+            Rolling 20-Period Sharpe Ratio
+            {endSharpe != null && (
+              <span style={{ marginLeft: 8, fontWeight: 600, color: endSharpe > 1 ? 'var(--green)' : endSharpe > 0 ? 'var(--yellow)' : 'var(--red)' }}>
+                Current: {endSharpe.toFixed(3)}
+              </span>
+            )}
+          </div>
+          <ResponsiveContainer width="100%" height={fullscreen ? 480 : 220}>
+            <LineChart data={sharpe} margin={{ top: 4, right: 16, bottom: 4, left: 8 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+              <XAxis dataKey="datetime" tickFormatter={fmtDate} tick={axisStyle} interval="preserveStartEnd" />
+              <YAxis tick={axisStyle} width={60} tickFormatter={(v: number) => v.toFixed(2)} />
+              <Tooltip
+                {...tooltipStyle}
+                labelFormatter={fmtDate}
+                formatter={(v: number) => [v.toFixed(4), 'Sharpe Ratio']}
+              />
+              <ReferenceLine y={0} stroke="var(--red)"    strokeWidth={1.5} strokeDasharray="4 4" label={{ value: '0', fill: 'var(--red)',    fontSize: 11, position: 'insideTopRight' }} />
+              <ReferenceLine y={1} stroke="var(--green)"  strokeWidth={1.5} strokeDasharray="4 4" label={{ value: 'Good (1.0)', fill: 'var(--green)', fontSize: 11, position: 'insideTopRight' }} />
+              <Line dataKey="sharpe" stroke="var(--accent-bright)" strokeWidth={2} dot={false} name="Sharpe" isAnimationActive={false} />
+              <Brush dataKey="datetime" height={22} tickFormatter={fmtDate} {...brushStyle} />
+            </LineChart>
+          </ResponsiveContainer>
+        </>
+      )}
+    </>
   )
 }

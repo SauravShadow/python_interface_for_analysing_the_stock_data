@@ -4,7 +4,7 @@ import './globals.css'
 import Sidebar from '@/components/Sidebar'
 
 export const metadata: Metadata = {
-  title: 'QuantDash — Python Intelligence Dashboard',
+  title: 'Subaru QuantDash — Python Intelligence Dashboard',
   description: 'Algorithmic trading intelligence: data management, technical analysis, ML and live market data.',
 }
 

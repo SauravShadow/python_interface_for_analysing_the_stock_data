@@ -17,11 +17,14 @@ import threading
 import queue
 import importlib.util
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 from config import settings  # backend's config
+from logger import get_logger
+
+log = get_logger("services.flattrade")
 
 # ── Add FlatTrade project to path ──────────────────────────────────────────────
 _ft_path = settings.FLATTRADE_PROJECT_PATH
@@ -89,7 +92,7 @@ class FlattradeService:
     # ── Session management ─────────────────────────────────────────────────────
 
     def _session_file(self) -> Path:
-        return Path(_ft_path) / ".session_token"
+        return Path(settings.DATA_DIR) / ".session_token"
 
     def load_saved_token(self) -> Optional[str]:
         p = self._session_file()
@@ -114,31 +117,56 @@ class FlattradeService:
                 self._token_loaded_at = datetime.utcnow()
                 return True
         except Exception as e:
-            print(f"[FlattradeService] Session init failed: {e}")
+            log.error("Session init failed: %s", e, exc_info=True)
         return False
 
     def try_load_existing_session(self) -> bool:
         """On startup, try to restore a saved session."""
         token = self.load_saved_token()
-        if token:
-            return self.init_session(token)
-        return False
+        if not token:
+            log.info("No saved session token found")
+            return False
+        log.info("Found saved session token — validating...")
+        ok = self.init_session(token)
+        if ok:
+            log.info("Session token valid — logged in")
+        else:
+            log.warning("Saved session token invalid or expired")
+        return ok
 
-    TOKEN_MAX_AGE_HOURS = 5
+    _IST = timezone(timedelta(hours=5, minutes=30))
+
+    def _token_expiry_utc(self, loaded_at_utc: datetime) -> datetime:
+        """
+        Returns the UTC datetime when a token loaded at loaded_at_utc expires.
+        FlatTrade tokens expire at TOKEN_EXPIRY_HOUR_IST (default 5 AM IST) daily.
+        """
+        expiry_hour = settings.TOKEN_EXPIRY_HOUR_IST
+        loaded_ist = loaded_at_utc.replace(tzinfo=timezone.utc).astimezone(self._IST)
+        expiry_ist = loaded_ist.replace(hour=expiry_hour, minute=0, second=0, microsecond=0)
+        if loaded_ist >= expiry_ist:
+            expiry_ist += timedelta(days=1)
+        return expiry_ist.astimezone(timezone.utc).replace(tzinfo=None)
 
     def is_logged_in(self) -> bool:
         if self._api is None or self._token is None:
             return False
-        age = self.get_token_age_hours()
-        if age is not None and age >= self.TOKEN_MAX_AGE_HOURS:
+        if self._token_loaded_at is None:
             return False
-        return True
+        return datetime.utcnow() < self._token_expiry_utc(self._token_loaded_at)
 
     def get_token_age_hours(self) -> Optional[float]:
         if self._token_loaded_at:
             delta = datetime.utcnow() - self._token_loaded_at
             return round(delta.total_seconds() / 3600, 2)
         return None
+
+    def get_token_hours_remaining(self) -> Optional[float]:
+        if self._token_loaded_at is None:
+            return None
+        expiry = self._token_expiry_utc(self._token_loaded_at)
+        remaining = (expiry - datetime.utcnow()).total_seconds() / 3600
+        return max(0.0, round(remaining, 2))
 
     @property
     def api(self):
@@ -213,36 +241,59 @@ class FlattradeService:
 
     def search_stock(self, query: str, exchange: str = "NSE") -> list[dict]:
         ret = self.api.searchscrip(exchange=exchange, searchtext=query)
-        if ret and "values" in ret:
-            return [
-                {
-                    "tsym": s["tsym"],
-                    "token": s["token"],
-                    "exchange": exchange,
-                    "cname": s.get("cname", ""),
-                }
-                for s in ret["values"][:15]
-            ]
-        return []
+        if not ret or "values" not in ret:
+            return []
+
+        def _rank(tsym: str) -> tuple:
+            q = query.upper()
+            t = tsym.upper()
+            if t == q:
+                return (0, len(t))                   # exact match
+            if t == q + "-EQ" or t == q + "-BE":
+                return (1, len(t))                   # standard equity suffix
+            if t.startswith(q):
+                return (2, len(t))                   # prefix match, shorter first
+            return (3, len(t))                        # other (contains query etc.)
+
+        values = sorted(ret["values"], key=lambda s: _rank(s["tsym"]))
+        return [
+            {
+                "tsym": s["tsym"],
+                "token": s["token"],
+                "exchange": exchange,
+                "cname": s.get("cname", ""),
+            }
+            for s in values[:15]
+        ]
 
     # ── Live quote ─────────────────────────────────────────────────────────────
 
     def get_quote(self, exchange: str, token: str) -> Optional[dict]:
+        log.debug("REST quote fetch: %s:%s", exchange, token)
         ret = self.api.get_quotes(exchange=exchange, token=token)
         if ret and ret.get("stat") == "Ok":
-            return {
+            ltp = float(ret.get("lp", 0))
+            prev_close = float(ret.get("c", 0))
+            if prev_close > 0 and ltp > 0:
+                change_pct = round((ltp - prev_close) / prev_close * 100, 2)
+            else:
+                change_pct = float(ret.get("pc", 0))
+            quote = {
                 "symbol": ret.get("tsym"),
                 "exchange": exchange,
                 "token": token,
-                "ltp": float(ret.get("lp", 0)),
+                "ltp": ltp,
                 "open": float(ret.get("o", 0)),
                 "high": float(ret.get("h", 0)),
                 "low": float(ret.get("l", 0)),
-                "close": float(ret.get("c", 0)),
+                "close": prev_close,
                 "volume": int(ret.get("v", 0)),
-                "change_pct": float(ret.get("pc", 0)),
+                "change_pct": change_pct,
                 "timestamp": datetime.utcnow().isoformat(),
             }
+            log.debug("Quote OK: %s ltp=%.2f chg=%.2f%%", quote["symbol"], ltp, change_pct)
+            return quote
+        log.warning("Quote fetch returned no data for %s:%s — stat=%s", exchange, token, ret.get("stat") if ret else "no response")
         return None
 
     # ── Historical data (used by data_service) ─────────────────────────────────

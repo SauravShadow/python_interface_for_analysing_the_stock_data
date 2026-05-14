@@ -5,8 +5,11 @@ import json
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
 
 from schemas.live import AlertRequest, LiveQuote
+from logger import get_logger
 from services.flattrade import flattrade_service
 from services.live_service import live_service
+
+log = get_logger("routers.live")
 
 router = APIRouter(prefix="/live", tags=["live"])
 
@@ -142,33 +145,70 @@ async def list_alerts() -> list[dict]:
 async def get_intraday(exchange: str, token: str) -> dict:
     """
     Get today's candles accumulated so far.
-    Uses FlatTrade historical endpoint with today's date range.
+    Uses FlatTrade historical endpoint with today's date range (IST).
     """
     if not flattrade_service.is_logged_in():
         raise HTTPException(status_code=401, detail="Not logged in")
-    from datetime import datetime, date
-    import time
 
-    start_ts = int(datetime.combine(date.today(), datetime.min.time()).timestamp())
-    end_ts = int(datetime.now().timestamp())
+    from datetime import datetime, timezone, timedelta
+    import pandas as pd
+
+    # Always use IST for "today" — the exchange operates on IST
+    IST = timezone(timedelta(hours=5, minutes=30))
+    now_ist   = datetime.now(IST)
+    today_ist = now_ist.date()
+    start_ist = datetime(today_ist.year, today_ist.month, today_ist.day,
+                         0, 0, 0, tzinfo=IST)
+    start_ts  = int(start_ist.timestamp())
+    end_ts    = int(now_ist.timestamp())
+
+    log.info("Intraday request: %s:%s  range %s → %s IST",
+             exchange, token,
+             start_ist.strftime("%Y-%m-%d %H:%M"),
+             now_ist.strftime("%H:%M"))
 
     try:
         ret = flattrade_service.get_time_price_series(exchange, token, start_ts, end_ts)
     except Exception as e:
+        log.error("get_time_price_series exception for %s:%s — %s", exchange, token, e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+    # FlatTrade returns None, [], or a dict like {"stat":"Not_Ok","emsg":"..."} on failure
     if not ret:
+        log.info("Intraday: no data returned for %s:%s (ret=%r)", exchange, token, ret)
         return {"candles": [], "count": 0}
 
-    import pandas as pd
+    if not isinstance(ret, list):
+        log.warning("Intraday: unexpected response type %s for %s:%s — %r",
+                    type(ret).__name__, exchange, token, ret)
+        return {"candles": [], "count": 0}
+
     df = pd.DataFrame(ret)
-    rename = {"time": "datetime", "into": "open", "inth": "high",
-              "intl": "low", "intc": "close", "intv": "volume"}
+    rename = {"into": "open", "inth": "high", "intl": "low", "intc": "close", "intv": "volume"}
     df.rename(columns={k: v for k, v in rename.items() if k in df.columns}, inplace=True)
     for col in ["open", "high", "low", "close", "volume"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-    df.sort_values("datetime", inplace=True)
 
+    # Build a numeric Unix-timestamp datetime column.
+    # FlatTrade always includes `ssboe` (seconds since epoch) — use that.
+    # Fall back to parsing `time` string ("HH:MM:SS DD-MM-YYYY" in IST) if needed.
+    if "ssboe" in df.columns:
+        df["datetime"] = pd.to_numeric(df["ssboe"], errors="coerce")
+    elif "time" in df.columns:
+        from datetime import timezone, timedelta as _td
+        _IST = timezone(_td(hours=5, minutes=30))
+        df["datetime"] = pd.to_datetime(
+            df["time"], format="%H:%M:%S %d-%m-%Y", errors="coerce"
+        ).apply(lambda x: int(x.replace(tzinfo=_IST).timestamp()) if pd.notna(x) else None)
+        log.warning("Intraday: ssboe missing for %s:%s — parsed time string instead", exchange, token)
+    else:
+        log.warning("Intraday: no usable time column for %s:%s — columns=%s",
+                    exchange, token, list(df.columns))
+        return {"candles": [], "count": 0}
+
+    df = df[["datetime", "open", "high", "low", "close", "volume"]].dropna(subset=["datetime"])
+    df.sort_values("datetime", inplace=True)
     candles = df.to_dict(orient="records")
+    log.info("Intraday: returning %d candles for %s:%s", len(candles), exchange, token)
     return {"candles": candles, "count": len(candles)}

@@ -35,6 +35,7 @@ async def get_status():
         logged_in=flattrade_service.is_logged_in(),
         client_id=ls.client_id,
         token_age_hours=flattrade_service.get_token_age_hours(),
+        token_hours_remaining=flattrade_service.get_token_hours_remaining(),
         status=ls.status,
         error=ls.error,
     )
@@ -48,5 +49,6 @@ async def logout():
         path.unlink()
     flattrade_service._api = None
     flattrade_service._token = None
+    flattrade_service._token_loaded_at = None
     flattrade_service.login_state.reset()
     return {"status": "logged_out"}

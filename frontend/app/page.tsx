@@ -38,21 +38,9 @@ export default function DashboardPage() {
 
   const QuickAction = ({ href, icon, title, desc, color }: any) => (
     <Link href={href} style={{ textDecoration: 'none' }}>
-      <div className="card" style={{
-        cursor: 'pointer',
-        transition: 'all 0.18s ease',
-        borderColor: 'var(--border)',
-      }}
-        onMouseEnter={e => {
-          (e.currentTarget as HTMLElement).style.borderColor = color
-          ;(e.currentTarget as HTMLElement).style.transform = 'translateY(-2px)'
-          ;(e.currentTarget as HTMLElement).style.boxShadow = `0 8px 24px rgba(0,0,0,0.4)`
-        }}
-        onMouseLeave={e => {
-          (e.currentTarget as HTMLElement).style.borderColor = 'var(--border)'
-          ;(e.currentTarget as HTMLElement).style.transform = 'none'
-          ;(e.currentTarget as HTMLElement).style.boxShadow = 'none'
-        }}
+      <div
+        className="card quick-action-card"
+        style={{ '--card-accent': color } as React.CSSProperties}
       >
         <div style={{ fontSize: '1.75rem', marginBottom: 12 }}>{icon}</div>
         <h3 style={{ marginBottom: 6, fontSize: '1rem' }}>{title}</h3>
@@ -105,28 +93,28 @@ export default function DashboardPage() {
 
         {/* Stats */}
         <div className="stat-grid">
-          <div className="stat-card blue">
+          <div className="stat-card blue" data-icon="📈">
             <div className="stat-label">Stocks Downloaded</div>
             <div className="stat-value">
               {loading ? <div className="skeleton" style={{ height: 36, width: 60 }} /> : (summary?.totalStocks ?? 0)}
             </div>
             <div className="stat-sub">Local CSV files</div>
           </div>
-          <div className="stat-card green">
+          <div className="stat-card green" data-icon="🕯️">
             <div className="stat-label">Total Candles</div>
             <div className="stat-value">
               {loading ? <div className="skeleton" style={{ height: 36, width: 80 }} /> : (summary?.totalRecords?.toLocaleString() ?? '0')}
             </div>
             <div className="stat-sub">1-min OHLCV records</div>
           </div>
-          <div className="stat-card purple">
+          <div className="stat-card purple" data-icon="🧠">
             <div className="stat-label">Trained Models</div>
             <div className="stat-value">
               {loading ? <div className="skeleton" style={{ height: 36, width: 40 }} /> : (summary?.trainedModels ?? 0)}
             </div>
             <div className="stat-sub">RF / XGB / LSTM</div>
           </div>
-          <div className="stat-card yellow">
+          <div className="stat-card yellow" data-icon="⚡">
             <div className="stat-label">Session Status</div>
             <div className="stat-value" style={{ fontSize: '1.1rem', marginTop: 6 }}>
               {auth.logged_in
@@ -153,7 +141,7 @@ export default function DashboardPage() {
         {/* Workflow guide */}
         <h2 style={{ marginBottom: 16, fontSize: '1.125rem' }}>Recommended Workflow</h2>
         <div className="card">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+          <div className="workflow-list" style={{ gap: 0 }}>
             {[
               { n: 1, icon: '🔑', title: 'Login',          desc: 'Connect to FlatTrade — token lasts until midnight',            href: '/login' },
               { n: 2, icon: '🔍', title: 'Search Stocks',  desc: 'Find stocks on NSE or BSE and add to your watchlist',         href: '/stocks' },

@@ -7,11 +7,9 @@ import { useAppStore } from '@/lib/store'
 
 type Step = 'idle' | 'credentials' | 'starting' | 'waiting_otp' | 'completing' | 'done' | 'error'
 
-const TOKEN_MAX_HOURS = 5
-
 export default function LoginPage() {
   const router = useRouter()
-  const { auth, setAuth } = useAppStore()
+  const { auth, setAuth, resetAuth } = useAppStore()
   const [step, setStep] = useState<Step>('idle')
   const [password, setPassword] = useState('')
   const [panOrDob, setPanOrDob] = useState('')
@@ -84,7 +82,7 @@ export default function LoginPage() {
 
   const handleLogout = async () => {
     await authApi.logout()
-    setAuth({ logged_in: false, status: 'idle', client_id: null })
+    resetAuth()
     setForceLogin(false)
     setStep('idle')
     setPassword('')
@@ -94,7 +92,7 @@ export default function LoginPage() {
 
   const handleForceLogin = async () => {
     await authApi.logout()
-    setAuth({ logged_in: false, status: 'idle', client_id: null })
+    resetAuth()
     setForceLogin(true)
     setStep('idle')
     setPassword('')
@@ -108,8 +106,8 @@ export default function LoginPage() {
 
   if ((auth.logged_in || step === 'done') && !forceLogin) {
     const ageHours = auth.token_age_hours ?? 0
-    const ageWarning = ageHours >= 4
-    const hoursLeft = Math.max(0, TOKEN_MAX_HOURS - ageHours).toFixed(1)
+    const hoursLeft = auth.token_hours_remaining ?? 0
+    const ageWarning = hoursLeft <= 1
 
     return (
       <div className="login-page">
@@ -260,7 +258,7 @@ export default function LoginPage() {
       <div className="login-card fade-in">
         <div className="login-logo">
           <div className="login-logo-icon">⚡</div>
-          <h1 style={{ fontSize: '1.75rem', textAlign: 'center' }}>QuantDash</h1>
+          <h1 style={{ fontSize: '1.75rem', textAlign: 'center' }}>Subaru QuantDash</h1>
           <p style={{ color: 'var(--text-secondary)', textAlign: 'center', fontSize: '0.875rem' }}>
             Connect to FlatTrade to begin
           </p>

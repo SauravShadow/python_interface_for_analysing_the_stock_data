@@ -1,30 +1,71 @@
 'use client'
 // app/analysis/compare/page.tsx — Multi-stock comparison
 import { useState, useEffect } from 'react'
+import { PanelLeftClose, PanelLeftOpen, ChevronDown } from 'lucide-react'
 import { dataApi, analysisApi } from '@/lib/api'
+import { useAppStore } from '@/lib/store'
 
 const COLORS = ['#3b82f6','#22c55e','#f59e0b','#a855f7','#ef4444','#06b6d4','#f97316','#84cc16']
 
+const DATE_PRESETS = [
+  { label: '1W',  days: 7 },
+  { label: '2W',  days: 14 },
+  { label: '1M',  days: 30 },
+  { label: '3M',  days: 90 },
+  { label: '6M',  days: 180 },
+  { label: '1Y',  days: 365 },
+  { label: '5Y',  days: 1825 },
+]
+
 export default function ComparePage() {
+  const { symbols: cachedSymbols, setSymbols: cacheSymbols } = useAppStore()
   const [symbols, setSymbols] = useState<string[]>([])
+  const [loadingSymbols, setLoadingSymbols] = useState(true)
   const [selected, setSelected] = useState<string[]>([])
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
+  const [activePreset, setActivePreset] = useState<number | null>(null)
   const [excludeDays, setExcludeDays] = useState<string[]>([])
   const [interval, setInterval] = useState(1)
   const [running, setRunning] = useState(false)
   const [results, setResults] = useState<Record<string, any> | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [activeView, setActiveView] = useState<'normalized'|'returns'|'correlation'|'metrics'>('normalized')
+  const [panelHidden, setPanelHidden] = useState(false)
+  const [stocksOpen, setStocksOpen] = useState(true)
+  const [optionsOpen, setOptionsOpen] = useState(true)
 
   useEffect(() => {
+    if (localStorage.getItem('compare-panel-hidden') === 'true') setPanelHidden(true)
+    if (localStorage.getItem('compare-stocks-open') === 'false') setStocksOpen(false)
+    if (localStorage.getItem('compare-options-open') === 'false') setOptionsOpen(false)
+  }, [])
+
+  useEffect(() => {
+    if (cachedSymbols.length) setSymbols(cachedSymbols)
     dataApi.getSummary()
-      .then(r => setSymbols(r.data.filter((s: any) => !s.symbol.includes('_')).map((s: any) => s.symbol)))
+      .then(r => {
+        const syms = r.data.filter((s: any) => !s.symbol.includes('_')).map((s: any) => s.symbol)
+        setSymbols(syms)
+        cacheSymbols(syms)
+        // Remove any selected symbols no longer on disk
+        setSelected(prev => prev.filter(s => syms.includes(s)))
+      })
       .catch(() => {})
+      .finally(() => setLoadingSymbols(false))
   }, [])
 
   const toggleSymbol = (s: string) =>
     setSelected(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s])
+
+  const applyPreset = (days: number) => {
+    const to = new Date()
+    const from = new Date()
+    from.setDate(from.getDate() - days)
+    setDateTo(to.toISOString().split('T')[0])
+    setDateFrom(from.toISOString().split('T')[0])
+    setActivePreset(days)
+  }
 
   const handleRun = async () => {
     if (selected.length < 2) return
@@ -98,61 +139,127 @@ export default function ComparePage() {
   return (
     <>
       <div className="topbar">
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={() => { const next = !panelHidden; setPanelHidden(next); localStorage.setItem('compare-panel-hidden', String(next)) }}
+          title={panelHidden ? 'Show configuration panel' : 'Hide configuration panel'}
+          style={{ padding: '6px 8px', flexShrink: 0 }}
+        >
+          {panelHidden ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+        </button>
         <span className="topbar-title">⚖️ Compare Stocks</span>
       </div>
 
       <div className="page-body">
-        <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr', gap: 24, alignItems: 'start' }}>
+        <div className="analysis-grid" style={{ display: 'grid', gridTemplateColumns: panelHidden ? '1fr' : '300px 1fr', gap: 24, alignItems: 'start' }}>
 
           {/* Config */}
-          <div style={{ position: 'sticky', top: 58 }}>
+          {!panelHidden && <div className="config-panel-sticky">
             <div className="card" style={{ marginBottom: 16 }}>
-              <h3 style={{ marginBottom: 14 }}>Select Stocks</h3>
-              {symbols.length === 0 && (
-                <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>No data — download stocks first</p>
-              )}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 240, overflowY: 'auto' }}>
-                {symbols.map((s, i) => (
-                  <label key={s} style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', padding: '7px 10px', borderRadius: 'var(--radius-sm)', background: selected.includes(s) ? 'var(--accent-glow)' : 'transparent', border: `1px solid ${selected.includes(s) ? 'rgba(59,130,246,0.3)' : 'transparent'}`, transition: 'all 0.15s' }}>
-                    <input type="checkbox" checked={selected.includes(s)} onChange={() => toggleSymbol(s)} />
-                    <div style={{ width: 10, height: 10, borderRadius: '50%', background: COLORS[symbols.indexOf(s) % COLORS.length], flexShrink: 0 }} />
-                    <span style={{ fontWeight: 600, fontSize: '0.875rem', fontFamily: 'monospace' }}>{s}</span>
-                  </label>
-                ))}
+              <div
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', marginBottom: stocksOpen ? 14 : 0, userSelect: 'none' }}
+                onClick={() => { const next = !stocksOpen; setStocksOpen(next); localStorage.setItem('compare-stocks-open', String(next)) }}
+              >
+                <h3 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  Select Stocks
+                  {loadingSymbols && <div className="spinner" style={{ width: 13, height: 13 }} onClick={e => e.stopPropagation()} />}
+                </h3>
+                <ChevronDown size={16} style={{ color: 'var(--text-muted)', transition: 'transform 0.2s ease', transform: stocksOpen ? 'rotate(0deg)' : 'rotate(-90deg)', flexShrink: 0 }} />
               </div>
-              {selected.length > 0 && (
+              {stocksOpen && (loadingSymbols ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--text-muted)', fontSize: '0.875rem', padding: '8px 0' }}>
+                  <div className="spinner" style={{ width: 13, height: 13 }} /> Checking available data…
+                </div>
+              ) : symbols.length === 0 ? (
+                <p style={{ color: 'var(--yellow)', fontSize: '0.875rem' }}>⚠ No data — <a href="/data" style={{ color: 'var(--accent-bright)' }}>download stocks first</a></p>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 240, overflowY: 'auto' }}>
+                  {symbols.map((s, i) => (
+                    <label key={s} style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', padding: '7px 10px', borderRadius: 'var(--radius-sm)', background: selected.includes(s) ? 'var(--accent-glow)' : 'transparent', border: `1px solid ${selected.includes(s) ? 'rgba(59,130,246,0.3)' : 'transparent'}`, transition: 'all 0.15s' }}>
+                      <input type="checkbox" checked={selected.includes(s)} onChange={() => toggleSymbol(s)} />
+                      <div style={{ width: 10, height: 10, borderRadius: '50%', background: COLORS[symbols.indexOf(s) % COLORS.length], flexShrink: 0 }} />
+                      <span style={{ fontWeight: 600, fontSize: '0.875rem', fontFamily: 'monospace' }}>{s}</span>
+                    </label>
+                  ))}
+                </div>
+              ))}
+              {stocksOpen && selected.length > 0 && (
                 <div style={{ marginTop: 10, fontSize: '0.8rem', color: 'var(--text-muted)' }}>{selected.length} selected</div>
               )}
             </div>
 
             <div className="card" style={{ marginBottom: 16 }}>
-              <h3 style={{ marginBottom: 12 }}>⚙️ Options</h3>
-              <div className="form-group">
-                <label className="form-label">Interval</label>
-                <select className="input" value={interval} onChange={e => setInterval(Number(e.target.value))}>
-                  {[[1,'1min'],[5,'5min'],[15,'15min'],[60,'1hr']].map(([v,l]) =>
-                    <option key={v} value={v}>{l}</option>
+              <div
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', marginBottom: optionsOpen ? 12 : 0, userSelect: 'none' }}
+                onClick={() => { const next = !optionsOpen; setOptionsOpen(next); localStorage.setItem('compare-options-open', String(next)) }}
+              >
+                <h3>⚙️ Options</h3>
+                <ChevronDown size={16} style={{ color: 'var(--text-muted)', transition: 'transform 0.2s ease', transform: optionsOpen ? 'rotate(0deg)' : 'rotate(-90deg)', flexShrink: 0 }} />
+              </div>
+              {optionsOpen && <>
+                <div className="form-group">
+                  <label className="form-label">Interval</label>
+                  <select className="input" value={interval} onChange={e => setInterval(Number(e.target.value))}>
+                    {[[1,'1min'],[5,'5min'],[15,'15min'],[60,'1hr']].map(([v,l]) =>
+                      <option key={v} value={v}>{l}</option>
+                    )}
+                  </select>
+                  {interval > 1 && (
+                    <div style={{ marginTop: 7, padding: '7px 10px', borderRadius: 'var(--radius-sm)', fontSize: '0.775rem', lineHeight: 1.5, background: 'rgba(234,179,8,0.08)', border: '1px solid rgba(234,179,8,0.25)', color: 'var(--yellow)' }}>
+                      ⏳ First run at {interval}min may take a moment to resample any uncached symbols — result is cached for future runs.
+                    </div>
                   )}
-                </select>
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label">From</label>
-                  <input className="input" type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
                 </div>
                 <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label">To</label>
-                  <input className="input" type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} />
+                  <label className="form-label">Date range</label>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 8 }}>
+                    {DATE_PRESETS.map(p => (
+                      <button
+                        key={p.days}
+                        className={`btn btn-sm ${activePreset === p.days ? 'btn-primary' : 'btn-secondary'}`}
+                        style={{ padding: '3px 10px', fontSize: '0.775rem' }}
+                        onClick={() => applyPreset(p.days)}
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                    <button
+                      className="btn btn-sm btn-ghost"
+                      style={{ padding: '3px 10px', fontSize: '0.775rem' }}
+                      onClick={() => { setDateFrom(''); setDateTo(''); setActivePreset(null) }}
+                    >
+                      All
+                    </button>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, overflow: 'hidden' }}>
+                    <input className="input" type="date" value={dateFrom}
+                      onChange={e => { setDateFrom(e.target.value); setActivePreset(null) }}
+                      style={{ fontSize: '0.8rem', minWidth: 0 }} />
+                    <input className="input" type="date" value={dateTo}
+                      onChange={e => { setDateTo(e.target.value); setActivePreset(null) }}
+                      style={{ fontSize: '0.8rem', minWidth: 0 }} />
+                  </div>
+                  {(dateFrom || dateTo) && (
+                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 4 }}>
+                      {dateFrom || '…'} → {dateTo || '…'}
+                    </div>
+                  )}
                 </div>
-              </div>
+              </>}
             </div>
 
             <button className="btn btn-primary w-full btn-lg" onClick={handleRun}
-              disabled={running || selected.length < 2}>
-              {running ? <><div className="spinner" style={{ width: 18, height: 18 }} /> Running...</> : `▶ Compare ${selected.length} Stocks`}
+              disabled={running || loadingSymbols || selected.length < 2 || symbols.length === 0}>
+              {running
+                ? <><div className="spinner" style={{ width: 18, height: 18 }} /> {interval > 1 ? 'Resampling & Comparing...' : `Comparing ${selected.length} stocks...`}</>
+                : loadingSymbols
+                  ? <><div className="spinner" style={{ width: 18, height: 18 }} /> Checking data…</>
+                  : `▶ Compare ${selected.length} Stocks`}
             </button>
-            {selected.length < 2 && <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', textAlign: 'center', marginTop: 8 }}>Select at least 2 stocks</p>}
-          </div>
+            {!loadingSymbols && selected.length < 2 && symbols.length > 0 && (
+              <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', textAlign: 'center', marginTop: 8 }}>Select at least 2 stocks</p>
+            )}
+          </div>}
 
           {/* Results */}
           <div>
@@ -164,16 +271,42 @@ export default function ComparePage() {
 
             {!results && !running && (
               <div className="card" style={{ textAlign: 'center', padding: '60px 32px', color: 'var(--text-secondary)' }}>
-                <div style={{ fontSize: '3rem', marginBottom: 16 }}>⚖️</div>
-                <h2 style={{ color: 'var(--text-primary)', marginBottom: 8 }}>Select & Compare</h2>
-                <p>Pick 2 or more stocks from the panel and run comparison</p>
+                {loadingSymbols ? (
+                  <>
+                    <div className="spinner" style={{ width: 36, height: 36, margin: '0 auto 16px', borderWidth: 3 }} />
+                    <h2 style={{ color: 'var(--text-primary)', marginBottom: 8 }}>Checking available data…</h2>
+                    <p>Loading your downloaded stocks.</p>
+                  </>
+                ) : symbols.length === 0 ? (
+                  <>
+                    <div style={{ fontSize: '3rem', marginBottom: 16 }}>📭</div>
+                    <h2 style={{ color: 'var(--text-primary)', marginBottom: 8 }}>No data available</h2>
+                    <p>Download at least 2 stocks to compare them.</p>
+                    <a href="/data" className="btn btn-primary" style={{ marginTop: 16, display: 'inline-flex' }}>📥 Download Data</a>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ fontSize: '3rem', marginBottom: 16 }}>⚖️</div>
+                    <h2 style={{ color: 'var(--text-primary)', marginBottom: 8 }}>Select & Compare</h2>
+                    <p>Pick 2 or more stocks from the panel and run comparison.</p>
+                  </>
+                )}
               </div>
             )}
 
             {running && (
               <div className="card" style={{ textAlign: 'center', padding: '60px 32px' }}>
                 <div className="spinner" style={{ width: 40, height: 40, margin: '0 auto 16px', borderWidth: 3 }} />
-                <p style={{ color: 'var(--text-secondary)' }}>Running comparison for {selected.join(', ')}...</p>
+                <p style={{ color: 'var(--text-secondary)', marginBottom: 6 }}>
+                  {interval > 1
+                    ? `Resampling to ${interval}min & comparing ${selected.join(', ')}…`
+                    : `Comparing ${selected.join(', ')}…`}
+                </p>
+                {interval > 1 && (
+                  <p style={{ fontSize: '0.8125rem', color: 'var(--text-muted)' }}>
+                    Building {interval}min candles for any uncached symbols. This only happens once — results are cached.
+                  </p>
+                )}
               </div>
             )}
 
@@ -234,7 +367,7 @@ export default function ComparePage() {
                 {activeView === 'returns' && (
                   <div style={{ display: 'grid', gap: 16 }}>
                     {selected.map((sym, i) => {
-                      const ret = results[sym]?.returns || []
+                      const ret = results[sym]?.returns?.series || []
                       const vals = ret.map((r: any) => r.daily_return || 0)
                       const mean = vals.reduce((a: number, b: number) => a + b, 0) / vals.length
                       const std = Math.sqrt(vals.reduce((a: number, b: number) => a + (b - mean) ** 2, 0) / vals.length)
@@ -245,7 +378,7 @@ export default function ComparePage() {
                             <div style={{ width: 12, height: 12, borderRadius: '50%', background: COLORS[i % COLORS.length] }} />
                             <h3>{sym}</h3>
                           </div>
-                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+                          <div className="compare-metrics-grid">
                             {[
                               ['Mean Return', `${mean.toFixed(3)}%`],
                               ['Std Dev', `${std.toFixed(3)}%`],
@@ -321,7 +454,7 @@ export default function ComparePage() {
                         </thead>
                         <tbody>
                           {selected.map((sym, i) => {
-                            const vals = (results[sym]?.returns || []).map((r: any) => r.daily_return || 0)
+                            const vals = (results[sym]?.returns?.series || []).map((r: any) => r.daily_return || 0)
                             if (!vals.length) return <tr key={sym}><td colSpan={7}>{sym}: no data</td></tr>
                             const mean = vals.reduce((a: number,b: number)=>a+b,0)/vals.length
                             const std = Math.sqrt(vals.reduce((a: number,b: number)=>a+(b-mean)**2,0)/vals.length)
