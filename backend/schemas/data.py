@@ -11,15 +11,14 @@ class DownloadRequest(BaseModel):
 
 class ResampleRequest(BaseModel):
     symbol: str = Field(..., description="e.g. INFY-EQ")
+    exchange: str = Field("NSE", description="e.g. NSE or BSE")
     interval_minutes: int = Field(..., ge=2, le=1440)
-    days: int = Field(30, ge=1)
 
 
 class DataSummaryItem(BaseModel):
     symbol: str
+    exchange: str
     records: int
     date_from: Optional[str] = None
     date_to: Optional[str] = None
-    size_kb: float
-    resampled_versions: list[str] = []
     last_updated: Optional[str] = None

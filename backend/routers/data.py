@@ -2,7 +2,7 @@
 routers/data.py — Data download, resample and management endpoints
 Uses SSE (Server-Sent Events) for streaming download progress.
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from schemas.data import DownloadRequest, ResampleRequest, DataSummaryItem
@@ -14,7 +14,7 @@ router = APIRouter(prefix="/data", tags=["data"])
 
 @router.get("/summary")
 async def get_summary() -> list[DataSummaryItem]:
-    """List all saved stock CSV files with metadata."""
+    """List all saved stock data with metadata (from TimescaleDB)."""
     items = data_service.get_summary()
     return [DataSummaryItem(**item) for item in items]
 
@@ -41,15 +41,15 @@ async def download_stocks(req: DownloadRequest):
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",   # disables Nginx buffering for SSE
+            "X-Accel-Buffering": "no",
         },
     )
 
 
 @router.post("/resample")
 async def resample_data(req: ResampleRequest) -> dict:
-    """Resample a saved 1-min CSV to any interval."""
-    result = data_service.resample(req.symbol, req.interval_minutes, req.days)
+    """Resample stock data to any interval using TimescaleDB time_bucket."""
+    result = data_service.resample(req.symbol, req.exchange, req.interval_minutes)
     if result is None:
         raise HTTPException(
             status_code=404,
@@ -59,9 +59,12 @@ async def resample_data(req: ResampleRequest) -> dict:
 
 
 @router.delete("/{symbol}")
-async def delete_symbol(symbol: str) -> dict:
-    """Delete a stock's CSV data (base + all resampled versions)."""
-    removed = data_service.delete_symbol(symbol)
+async def delete_symbol(
+    symbol: str,
+    exchange: str = Query("NSE", description="Exchange the symbol belongs to"),
+) -> dict:
+    """Delete a stock's OHLCV data from TimescaleDB."""
+    removed = data_service.delete_symbol(symbol, exchange)
     if not removed:
         raise HTTPException(status_code=404, detail=f"No data found for {symbol}")
-    return {"status": "deleted", "symbol": symbol}
+    return {"status": "deleted", "symbol": symbol, "exchange": exchange}
