@@ -264,7 +264,7 @@ class MLService:
         try:
             # Load data
             yield _emit({"type": "progress", "msg": "Loading data..."})
-            df = data_service.load_for_analysis(symbol, interval)
+            df = data_service.load_for_analysis(symbol, exchange, interval)
             if df is None or df.empty:
                 yield _emit({"type": "error", "msg": f"No data for {symbol}"})
                 return
@@ -346,11 +346,24 @@ class MLService:
 
                 y_pred = model.predict(X_test)
                 if task == "classification":
-                    from sklearn.metrics import accuracy_score, f1_score
+                    from sklearn.metrics import (
+                        accuracy_score, f1_score, confusion_matrix, classification_report
+                    )
                     metrics = {
                         "accuracy": round(float(accuracy_score(y_test, y_pred)), 4),
                         "f1":       round(float(f1_score(y_test, y_pred, average="weighted")), 4),
                     }
+                    try:
+                        cm = confusion_matrix(y_test, y_pred)
+                        labels = sorted(set(list(y_test)))
+                        metrics["confusion_matrix"] = cm.tolist()
+                        metrics["confusion_labels"] = [str(l) for l in labels]
+                        report = classification_report(y_test, y_pred, output_dict=True)
+                        for lbl in metrics["confusion_labels"]:
+                            metrics[f"precision_{lbl}"] = round(report.get(str(lbl), {}).get("precision", 0.0), 4)
+                            metrics[f"recall_{lbl}"]    = round(report.get(str(lbl), {}).get("recall",    0.0), 4)
+                    except Exception:
+                        pass
                 else:
                     from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
                     metrics = {
@@ -392,6 +405,7 @@ class MLService:
         model_path: str,
         model_type: str,
         symbol: str,
+        exchange: str,
         interval: str,
         features: list[str],
         task: str,
@@ -399,7 +413,7 @@ class MLService:
         lookback_steps: int = 10,
     ) -> dict:
         """Run inference on the most recent data."""
-        df = data_service.load_for_analysis(symbol, interval)
+        df = data_service.load_for_analysis(symbol, exchange, interval)
         if df is None or df.empty:
             return {"error": f"No data for {symbol}"}
 
