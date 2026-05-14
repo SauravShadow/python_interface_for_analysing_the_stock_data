@@ -76,7 +76,7 @@ A full-stack personal trading dashboard for Indian equity markets (NSE/BSE). Con
 ```mermaid
 graph TB
     subgraph Client["Browser (Next.js)"]
-        UI[Pages / Components]
+        UI["Pages / Components"]
         Store[Zustand Auth Store]
         API_LIB[Axios API Client]
         WS_CLIENT[WebSocket Client]
@@ -87,12 +87,12 @@ graph TB
     end
 
     subgraph Backend["FastAPI Backend :8000"]
-        AUTH_R[/api/auth]
-        STOCK_R[/api/stocks]
-        DATA_R[/api/data]
-        ANALYSIS_R[/api/analysis]
-        ML_R[/api/ml]
-        LIVE_R[/api/live/ws]
+        AUTH_R["/api/auth"]
+        STOCK_R["/api/stocks"]
+        DATA_R["/api/data"]
+        ANALYSIS_R["/api/analysis"]
+        ML_R["/api/ml"]
+        LIVE_R["/api/live/ws"]
 
         FT_SVC[FlattradeService]
         LIVE_SVC[LiveService]
@@ -282,7 +282,7 @@ graph TD
 
 ```mermaid
 flowchart TD
-    A[User selects symbol\n+ analysis types\n+ filters] --> B[POST /api/analysis/run]
+    A["User selects symbol\n+ analysis types\n+ filters"] --> B["POST /api/analysis/run"]
 
     B --> C{mode?}
 
@@ -291,12 +291,12 @@ flowchart TD
     E --> F[Run selected analysis types]
 
     F --> F1[price: OHLC stats, levels]
-    F --> F2[technicals: SMA/EMA/MACD/RSI/BB/ATR]
+    F --> F2["technicals: SMA/EMA/MACD/RSI/BB/ATR"]
     F --> F3[volatility: rolling vol, Parkinson]
     F --> F4[volume: OBV, volume profile]
-    F --> F5[patterns: hour/day-of-week heatmap]
+    F --> F5["patterns: hour/day-of-week heatmap"]
     F --> F6[drawdown: max DD, duration]
-    F --> F7[seasonality: monthly/weekly patterns]
+    F --> F7["seasonality: monthly/weekly patterns"]
     F --> F8[momentum: ROC, divergence]
     F --> F9[riskreturn: Sharpe, Sortino, VaR]
 
@@ -310,7 +310,7 @@ flowchart TD
 
     K --> L[Frontend renders charts]
     L --> M{Save?}
-    M -- yes --> N[POST /api/analysis/save\n→ PostgreSQL]
+    M -- yes --> N["POST /api/analysis/save\n→ PostgreSQL"]
 ```
 
 ---
@@ -566,11 +566,11 @@ Navigate to `http://localhost` (or your configured domain).
 
 ```mermaid
 graph LR
-    A[1. Login\n/login] --> B[2. Add Stocks\n/stocks]
-    B --> C[3. Download Data\n/data]
-    C --> D[4. Analyse\n/analysis]
-    D --> E[5. Train ML Model\n/ml/train]
-    E --> F[6. Watch Live\n/live]
+    A["1. Login\n/login"] --> B["2. Add Stocks\n/stocks"]
+    B --> C["3. Download Data\n/data"]
+    C --> D["4. Analyse\n/analysis"]
+    D --> E["5. Train ML Model\n/ml/train"]
+    E --> F["6. Watch Live\n/live"]
 ```
 
 ---
