@@ -154,6 +154,7 @@ async def predict(req: PredictRequest, db: AsyncSession = Depends(get_db)) -> di
         model_path=m.model_path,
         model_type=m.model_type,
         symbol=req.symbol,
+        exchange=m.exchange,
         interval=m.data_interval,
         features=m.features,
         task=m.task,
@@ -164,9 +165,9 @@ async def predict(req: PredictRequest, db: AsyncSession = Depends(get_db)) -> di
 
 
 @router.get("/recent-prices/{symbol}")
-async def get_recent_prices(symbol: str, interval: str = "1min", n: int = 60) -> dict:
+async def get_recent_prices(symbol: str, exchange: str = "NSE", interval: str = "1min", n: int = 60) -> dict:
     """Return the last N closing prices for a symbol (used for prediction chart context)."""
-    df = data_service.load_for_analysis(symbol, interval)
+    df = data_service.load_for_analysis(symbol, exchange, interval)
     if df is None or df.empty:
         raise HTTPException(status_code=404, detail=f"No data for symbol: {symbol}")
     tail = df.tail(n).reset_index()
@@ -192,7 +193,7 @@ async def backtest_model(model_id: str, n: int = 200, db: AsyncSession = Depends
     if not m.model_path or not os.path.exists(m.model_path):
         raise HTTPException(status_code=400, detail="Model file not found on disk")
 
-    df = data_service.load_for_analysis(m.symbol, m.data_interval or "1min")
+    df = data_service.load_for_analysis(m.symbol, m.exchange or "NSE", m.data_interval or "1min")
     if df is None or df.empty:
         raise HTTPException(status_code=404, detail=f"No data for symbol: {m.symbol}")
 
