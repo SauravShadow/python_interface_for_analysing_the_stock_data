@@ -2,5 +2,6 @@
 from .watchlist import Watchlist
 from .analysis import Analysis
 from .ml_model import MLModel
+from .ohlcv import StockOHLCV
 
-__all__ = ["Watchlist", "Analysis", "MLModel"]
+__all__ = ["Watchlist", "Analysis", "MLModel", "StockOHLCV"]
